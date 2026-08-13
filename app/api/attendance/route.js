@@ -1,7 +1,16 @@
-
+// app/api/attendance/route.js
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { calculateDistanceMeters } from '@/lib/geofence';
+
+// time minute hour
+function getFormattedTime() {
+  return new Date().toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
 
 export async function POST(request) {
   try {
@@ -22,7 +31,6 @@ export async function POST(request) {
     let userId;
 
     if (userRes.rows.length === 0) {
-      // reg for new user
       if (!fullName || !fullName.trim()) {
         return NextResponse.json(
           { error: 'First-time registration requires a Full Name.' },
@@ -36,7 +44,6 @@ export async function POST(request) {
       );
       userId = newUser.rows[0].id;
     } else {
-      // verify password for old user
       const existingUser = userRes.rows[0];
       if (existingUser.password_hash !== cleanPassword) {
         return NextResponse.json(
@@ -47,7 +54,7 @@ export async function POST(request) {
       userId = existingUser.id;
     }
 
-    //  Fetch btel location
+    // office loaction
     const officeRes = await query(
       'SELECT latitude, longitude, radius_meters FROM office_locations LIMIT 1'
     );
@@ -64,7 +71,7 @@ export async function POST(request) {
     const officeLon = parseFloat(office.longitude);
     const maxRadius = office.radius_meters || 100;
 
-    // Calculate distance
+    // distance
     const distanceMeters = calculateDistanceMeters(
       parseFloat(latitude),
       parseFloat(longitude),
@@ -77,18 +84,15 @@ export async function POST(request) {
     if (!isWithinGeofence) {
       return NextResponse.json({
         success: false,
-        message: `Check-in failed. You are ${distanceMeters}m away from office (Allowed: ${maxRadius}m).`,
+        message: `Check-in failed. You are ${distanceMeters}m away from office`,
         distanceMeters,
       });
     }
 
-    // Record Sign In / Sign Out
-    const formattedTime = new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-    });
+    // time
+    const currentTimeFormatted = getFormattedTime();
 
+    //doing sign in sign out
     if (action === 'signin') {
       const insertRes = await query(
         `INSERT INTO attendance_logs 
@@ -100,21 +104,22 @@ export async function POST(request) {
 
       return NextResponse.json({
         success: true,
-        message: `Signed in successfully at ${new Date().toLocaleTimeString()}!`,
+        message: `Signed IN successfully at ${currentTimeFormatted}!`,
         log: insertRes.rows[0],
       });
     } else if (action === 'signout') {
+      // Find the most recent open sign-in record
       const todayLog = await query(
         `SELECT id FROM attendance_logs 
-         WHERE user_id = $1 AND marked_at >= $2 AND signed_out_at IS NULL 
+         WHERE user_id = $1 AND signed_out_at IS NULL 
          ORDER BY marked_at DESC LIMIT 1`,
-        [userId, todayStart]
+        [userId]
       );
 
       if (todayLog.rows.length === 0) {
         return NextResponse.json({
           success: false,
-          message: 'No active Sign-In record found for today. Please Sign In first!',
+          message: 'No active Sign-In record found. Please Sign In first!',
         });
       }
 
@@ -127,14 +132,14 @@ export async function POST(request) {
 
       return NextResponse.json({
         success: true,
-        message: `Signed OUT successfully at ${formattedTime}!`,
+        message: `Signed OUT successfully at ${currentTimeFormatted}!`,
         log: updateRes.rows[0],
       });
     }
   } catch (error) {
-    console.error('Error recording attendance:', error);
+    console.error('Server error recording attendance:', error);
     return NextResponse.json(
-      { error: 'Server error recording attendance' },
+      { error: 'Server error recording attendance: ' + error.message },
       { status: 500 }
     );
   }
