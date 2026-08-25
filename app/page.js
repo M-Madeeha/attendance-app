@@ -41,11 +41,28 @@ export default function StaffAttendanceApp() {
       year: 'numeric',
     });
   };
+  // Helper to get or create a persistent device identifier
+function getOrCreateDeviceId() {
+  if (typeof window === 'undefined') return '';
+  let id = localStorage.getItem('btel_device_id');
+  if (!id) {
+    id = 'dev_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now().toString(36);
+    localStorage.setItem('btel_device_id', id);
+  }
+  return id;
+}
 
   // 1. Fetch latest attendance state from DB
+const [mounted, setMounted] = useState(false);
+
+  // Sync attendance safely from DB
   const syncAttendanceData = async (userEmail) => {
     try {
       const res = await fetch(`/api/attendance?email=${encodeURIComponent(userEmail)}`);
+      if (!res.ok) {
+        console.error('Server returned error status:', res.status);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setTodayLog(data.todayLog);
@@ -56,8 +73,8 @@ export default function StaffAttendanceApp() {
     }
   };
 
-  // 2. Load profile on startup & restore morning state
-  useEffect(() => {
+useEffect(() => {
+    setMounted(true);
     const savedUser = localStorage.getItem('staff_profile');
     if (savedUser) {
       const parsedUser = JSON.parse(savedUser);
@@ -65,6 +82,9 @@ export default function StaffAttendanceApp() {
       syncAttendanceData(parsedUser.email);
     }
   }, []);
+
+  // Avoid server/client hydration mismatch during first paint
+  if (!mounted) return null;
 
   // Save profile setup
   const handleSaveProfile = (e) => {
@@ -109,7 +129,7 @@ export default function StaffAttendanceApp() {
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         try {
-          const res = await fetch('/api/attendance', {
+         const res = await fetch('/api/attendance', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -119,6 +139,7 @@ export default function StaffAttendanceApp() {
               latitude: position.coords.latitude,
               longitude: position.coords.longitude,
               action,
+              deviceId: getOrCreateDeviceId(), // <-- Sends phone's unique key
             }),
           });
 
