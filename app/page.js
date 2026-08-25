@@ -179,7 +179,7 @@ useEffect(() => {
           <div>
             <h1 className="text-xl font-bold text-slate-800 text-center">Create Profile</h1>
             <p className="text-xs text-slate-500 text-center mt-1 mb-5">
-              Set up your profile once. Your device will remember you.
+              Set up your profile.
             </p>
 
             <form onSubmit={handleSaveProfile} className="space-y-3 mb-6">
@@ -187,7 +187,7 @@ useEffect(() => {
                 <label className="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
                 <input
                   type="text"
-                  placeholder="e.g. Alex Johnson"
+                  placeholder="e.g. Ahmad Musa"
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -199,7 +199,7 @@ useEffect(() => {
                 <label className="block text-xs font-semibold text-slate-600 mb-1">Email Address</label>
                 <input
                   type="email"
-                  placeholder="alex@company.com"
+                  placeholder="ahmad.musa@btel.com.ng"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
