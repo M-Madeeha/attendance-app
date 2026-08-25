@@ -3,18 +3,19 @@
 
 import { useState, useEffect } from 'react';
 
-export default function StaffCheckInPage() {
+export default function StaffAttendanceApp() {
   const [userProfile, setUserProfile] = useState(null);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
-  
-  // Track active session for today (stores sign-in time once clicked)
-  const [activeSession, setActiveSession] = useState(null);
 
-  // Today's formatted date string (Day, DD Month YYYY)
+  // Today's attendance state from database
+  const [todayLog, setTodayLog] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+
   const todayFormattedDate = new Date().toLocaleDateString('en-GB', {
     weekday: 'long',
     day: 'numeric',
@@ -22,27 +23,54 @@ export default function StaffCheckInPage() {
     year: 'numeric',
   });
 
-  // Load profile and check today's attendance status on app start
+  // Helper to format ISO timestamp to "9:05 AM"
+  const formatTimeOnly = (isoString) => {
+    if (!isoString) return null;
+    return new Date(isoString).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+  };
+
+  // Helper to format date for history: "13 Aug 2026"
+  const formatDateOnly = (isoString) => {
+    return new Date(isoString).toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    });
+  };
+
+  // 1. Fetch latest attendance state from DB
+  const syncAttendanceData = async (userEmail) => {
+    try {
+      const res = await fetch(`/api/attendance?email=${encodeURIComponent(userEmail)}`);
+      const data = await res.json();
+      if (data.success) {
+        setTodayLog(data.todayLog);
+        setHistory(data.history || []);
+      }
+    } catch (err) {
+      console.error('Failed to sync attendance:', err);
+    }
+  };
+
+  // 2. Load profile on startup & restore morning state
   useEffect(() => {
     const savedUser = localStorage.getItem('staff_profile');
     if (savedUser) {
       const parsedUser = JSON.parse(savedUser);
       setUserProfile(parsedUser);
-      
-      // Check if they already signed in today
-      const todayKey = `attendance_session_${parsedUser.email}_${new Date().toISOString().split('T')[0]}`;
-      const savedSession = localStorage.getItem(todayKey);
-      if (savedSession) {
-        setActiveSession(JSON.parse(savedSession));
-      }
+      syncAttendanceData(parsedUser.email);
     }
   }, []);
 
-  // Save Profile Setup
+  // Save profile setup
   const handleSaveProfile = (e) => {
     e.preventDefault();
     if (!email.trim() || !password.trim() || !fullName.trim()) {
-      setMessage({ type: 'error', text: 'Please fill in all profile fields.' });
+      setMessage({ type: 'error', text: 'Please fill in all fields.' });
       return;
     }
 
@@ -54,18 +82,20 @@ export default function StaffCheckInPage() {
 
     localStorage.setItem('staff_profile', JSON.stringify(profile));
     setUserProfile(profile);
+    syncAttendanceData(profile.email);
     setMessage(null);
   };
 
-  // Logout / Switch Account
-  const handleSignOutProfile = () => {
+  // Switch Account / Logout
+  const handleSwitchAccount = () => {
     localStorage.removeItem('staff_profile');
     setUserProfile(null);
-    setActiveSession(null);
+    setTodayLog(null);
+    setHistory([]);
     setMessage(null);
   };
 
-  // GPS Check-In Handler
+  // 3. Mark Attendance (Sign In / Sign Out)
   const handleAttendance = (action) => {
     setMessage(null);
     setLoading(true);
@@ -78,9 +108,6 @@ export default function StaffCheckInPage() {
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        const lat = position.coords.latitude;
-        const lon = position.coords.longitude;
-
         try {
           const res = await fetch('/api/attendance', {
             method: 'POST',
@@ -89,8 +116,8 @@ export default function StaffCheckInPage() {
               fullName: userProfile.fullName,
               email: userProfile.email,
               password: userProfile.password,
-              latitude: lat,
-              longitude: lon,
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
               action,
             }),
           });
@@ -98,46 +125,20 @@ export default function StaffCheckInPage() {
           const data = await res.json();
 
           if (data.success) {
-            const timeNow = new Date().toLocaleTimeString('en-US', {
-              hour: 'numeric',
-              minute: '2-digit',
-              hour12: true,
-            });
-
-            const todayKey = `attendance_session_${userProfile.email}_${new Date().toISOString().split('T')[0]}`;
-
-            if (action === 'signin') {
-              const sessionData = {
-                signInTime: timeNow,
-                signOutTime: null,
-              };
-              localStorage.setItem(todayKey, JSON.stringify(sessionData));
-              setActiveSession(sessionData);
-              setMessage({ type: 'success', text: `Signed in successfully at ${timeNow}!` });
-            } else if (action === 'signout') {
-              const updatedSession = {
-                ...activeSession,
-                signOutTime: timeNow,
-              };
-              localStorage.setItem(todayKey, JSON.stringify(updatedSession));
-              setActiveSession(updatedSession);
-              setMessage({ type: 'success', text: `Signed out successfully at ${timeNow}!` });
-            }
+            setMessage({ type: 'success', text: data.message });
+            await syncAttendanceData(userProfile.email);
           } else {
             setMessage({ type: 'error', text: data.message || data.error });
           }
         } catch (err) {
-          setMessage({ type: 'error', text: 'Failed to connect to server.' });
+          setMessage({ type: 'error', text: 'Server connection failed.' });
         } finally {
           setLoading(false);
         }
       },
-      (error) => {
+      () => {
         setLoading(false);
-        setMessage({
-          type: 'error',
-          text: 'Unable to retrieve location. Please enable GPS permissions.',
-        });
+        setMessage({ type: 'error', text: 'Location access denied. Please enable GPS.' });
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
@@ -149,19 +150,15 @@ export default function StaffCheckInPage() {
         
         {/* Company Logo */}
         <div className="w-16 h-16 mx-auto mb-3 flex items-center justify-center">
-          <img
-            src="/BtelLogo.jpg"
-            alt="Btel"
-            className="h-full w-auto object-contain"
-          />
+          <img src="/BtelLogo.jpg" alt="Btel Logo" className="h-full w-auto object-contain" />
         </div>
 
-        {/* STEP 1: CREATE PROFILE */}
+        {/* --- STEP 1: CREATE PROFILE (Only shown first time) --- */}
         {!userProfile ? (
           <div>
             <h1 className="text-xl font-bold text-slate-800 text-center">Create Profile</h1>
             <p className="text-xs text-slate-500 text-center mt-1 mb-5">
-              Set up your profile.
+              Set up your profile once. Your device will remember you.
             </p>
 
             <form onSubmit={handleSaveProfile} className="space-y-3 mb-6">
@@ -169,7 +166,7 @@ export default function StaffCheckInPage() {
                 <label className="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
                 <input
                   type="text"
-                  placeholder="e.g. Ahmad Musa"
+                  placeholder="e.g. Alex Johnson"
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -181,7 +178,7 @@ export default function StaffCheckInPage() {
                 <label className="block text-xs font-semibold text-slate-600 mb-1">Email Address</label>
                 <input
                   type="email"
-                  placeholder="ahmad.musa@btel.com.ng"
+                  placeholder="alex@company.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -190,7 +187,7 @@ export default function StaffCheckInPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Create Password</label>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Password</label>
                 <input
                   type="password"
                   placeholder="••••••••"
@@ -210,85 +207,111 @@ export default function StaffCheckInPage() {
             </form>
           </div>
         ) : (
-          /*  attendance screen */
+          /* --- STEP 2: DAILY ATTENDANCE DASHBOARD --- */
           <div>
+            {/* User Header */}
             <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
               <div>
-                <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Welcome</span>
+                <span className="text-xs font-medium text-slate-400">Welcome back,</span>
                 <h2 className="text-sm font-bold text-slate-800">{userProfile.fullName}</h2>
               </div>
-              <button
-                onClick={handleSignOutProfile}
-                className="text-xs text-red-500 hover:underline"
-              >
-                Switch Account
+              <button onClick={handleSwitchAccount} className="text-xs text-red-500 hover:underline">
+                Switch
               </button>
             </div>
 
-            {/* if not signed in */}
-            {!activeSession ? (
-              <div className="my-6">
+            {/* NOT SIGNED IN TODAY */}
+            {!todayLog ? (
+              <div className="my-6 text-center">
+                <p className="text-xs text-slate-500 mb-3 font-medium">{todayFormattedDate}</p>
                 <button
                   onClick={() => handleAttendance('signin')}
                   disabled={loading}
                   className={`w-full py-3.5 px-4 rounded-xl font-semibold text-white shadow-md text-sm transition-all ${
-                    loading
-                      ? 'bg-slate-400 cursor-not-allowed'
-                      : 'bg-blue-600 hover:bg-blue-700 active:scale-98'
+                    loading ? 'bg-slate-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 active:scale-98'
                   }`}
                 >
-                  {loading ? 'Checking Location...' : 'Sign In'}
+                  {loading ? 'Locating GPS...' : 'Sign In 🟢'}
                 </button>
               </div>
             ) : (
-              /* aftee signing in*/
-              <div className="mt-4 mb-6">
-                {/* Date Header */}
+              /* SIGNED IN TODAY -> SHOW TODAY'S SUMMARY */
+              <div className="mt-2 mb-4">
                 <div className="bg-blue-50 border border-blue-200 rounded-t-xl p-2.5 text-center">
                   <p className="text-xs font-bold text-blue-900">{todayFormattedDate}</p>
                 </div>
 
-                {/* Table Data */}
                 <div className="border border-t-0 border-slate-200 rounded-b-xl p-3 bg-slate-50 space-y-2 text-xs">
                   <div className="flex justify-between items-center border-b pb-2">
-                    <span className="text-slate-500"> Name:</span>
+                    <span className="text-slate-500">Staff Name:</span>
                     <span className="font-semibold text-slate-800">{userProfile.fullName}</span>
                   </div>
 
                   <div className="flex justify-between items-center border-b pb-2">
                     <span className="text-slate-500">Sign In Time:</span>
                     <span className="font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded">
-                      {activeSession.signInTime}
+                      {formatTimeOnly(todayLog.marked_at)}
                     </span>
                   </div>
 
-                  {activeSession.signOutTime && (
+                  {todayLog.signed_out_at && (
                     <div className="flex justify-between items-center pt-1">
                       <span className="text-slate-500">Sign Out Time:</span>
                       <span className="font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded">
-                        {activeSession.signOutTime}
+                        {formatTimeOnly(todayLog.signed_out_at)}
                       </span>
                     </div>
                   )}
                 </div>
 
-                {/* Sign Out Button (Shown at the bottom until signed out) */}
-                {!activeSession.signOutTime ? (
+                {/* Sign Out Button (Hides once signed out) */}
+                {!todayLog.signed_out_at ? (
                   <button
                     onClick={() => handleAttendance('signout')}
                     disabled={loading}
                     className={`w-full mt-4 py-3 px-4 rounded-xl font-semibold text-white shadow-md text-sm transition-all ${
-                      loading
-                        ? 'bg-slate-400 cursor-not-allowed'
-                        : 'bg-blue-600 hover:bg-blue-700 active:scale-98'
+                      loading ? 'bg-slate-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700 active:scale-98'
                     }`}
                   >
-                    {loading ? 'Checking Location...' : 'Sign Out'}
+                    {loading ? 'Locating GPS...' : 'Sign Out 🔴'}
                   </button>
                 ) : (
-                  <div className="mt-4 p-2.5 bg-slate-100 rounded-lg text-center text-xs font-medium text-slate-600">
-                    Shift Completed
+                  <div className="mt-3 p-2 bg-green-50 border border-green-200 rounded-lg text-center text-xs font-medium text-green-800">
+                    ✅ Completed shift for today!
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* Past History Trigger Button */}
+            <button
+              onClick={() => setShowHistory(!showHistory)}
+              className="w-full mt-2 py-2 px-3 text-xs text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg font-medium transition-all"
+            >
+              {showHistory ? 'Hide History ▲' : 'View Past Attendance 📅'}
+            </button>
+
+            {/* Attendance History Accordion / List */}
+            {showHistory && (
+              <div className="mt-3 border-t border-slate-200 pt-3 max-h-48 overflow-y-auto space-y-2">
+                <p className="text-[11px] font-bold text-slate-600 uppercase tracking-wide">Past Records</p>
+                {history.length === 0 ? (
+                  <p className="text-xs text-slate-400">No previous logs found.</p>
+                ) : (
+                  history.map((item) => (
+                    <div key={item.id} className="p-2 bg-slate-50 border border-slate-200 rounded text-xs">
+                      <div className="flex justify-between font-semibold text-slate-700 mb-1">
+                        <span>{formatDateOnly(item.marked_at)}</span>
+                        <span className="text-green-600">IN: {formatTimeOnly(item.marked_at)}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-500 text-[11px]">
+                        <span>Status: Present</span>
+                        <span className={item.signed_out_at ? 'text-red-600' : 'text-slate-400'}>
+                          OUT: {item.signed_out_at ? formatTimeOnly(item.signed_out_at) : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
             )}
@@ -297,7 +320,7 @@ export default function StaffCheckInPage() {
 
         {message && (
           <div
-            className={`p-3 rounded-lg text-xs font-medium text-center ${
+            className={`mt-4 p-3 rounded-lg text-xs font-medium text-center ${
               message.type === 'success'
                 ? 'bg-green-100 text-green-800 border border-green-300'
                 : 'bg-red-100 text-red-800 border border-red-300'
