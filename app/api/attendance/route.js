@@ -1,7 +1,8 @@
 // app/api/attendance/route.js
 import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import { databaseErrorMessage, query } from '@/lib/db';
 import { calculateDistanceMeters } from '@/lib/geofence';
+import { officeDay, officeToday } from '@/lib/office-time';
 
 // Time format helper: "2:30 PM" (no seconds)
 function getFormattedTime() {
@@ -29,15 +30,15 @@ export async function GET(request) {
     );
 
     if (userRes.rows.length === 0) {
-      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+      return NextResponse.json({ success: true, todayLog: null, history: [] });
     }
     const userId = userRes.rows[0].id;
 
-    // 2. Fetch today's record (from 12:00 AM today onward)
+    // 2. Fetch today's record for the Lagos office day
     const todayLogRes = await query(
       `SELECT id, marked_at, signed_out_at 
        FROM attendance_logs 
-       WHERE user_id = $1 AND marked_at >= CURRENT_DATE 
+       WHERE user_id = $1 AND ${officeDay('marked_at')} = ${officeToday()}
        ORDER BY marked_at DESC LIMIT 1`,
       [userId]
     );
@@ -58,7 +59,7 @@ export async function GET(request) {
     });
   } catch (error) {
     console.error('Error fetching attendance data:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: databaseErrorMessage(error) }, { status: 500 });
   }
 }
 
@@ -148,21 +149,43 @@ export async function POST(request) {
       officeLat,
       officeLon
     );
-//temp bypass uncomment the others
     const isWithinGeofence = distanceMeters <= maxRadius;
+    const roundedDistance = Math.round(distanceMeters);
 
-    // if (!isWithinGeofence) {
-    //   return NextResponse.json({
-    //     success: false,
-    //     message: `Check-in failed. You are ${distanceMeters}m away from office (Allowed: ${maxRadius}m).`,
-    //     distanceMeters,
-    //   });
-    // }
+    if (!isWithinGeofence) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `You are ${roundedDistance} m from the office. Attendance is only accepted within ${maxRadius} m.`,
+          distanceMeters,
+        },
+        { status: 403 }
+      );
+    }
 
     const currentTimeFormatted = getFormattedTime();
 
     // 4. Action handling
     if (action === 'signin') {
+      const existingToday = await query(
+        `SELECT id, signed_out_at FROM attendance_logs
+         WHERE user_id = $1 AND ${officeDay('marked_at')} = ${officeToday()}
+         ORDER BY marked_at DESC LIMIT 1`,
+        [userId]
+      );
+
+      if (existingToday.rows.length > 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: existingToday.rows[0].signed_out_at
+              ? 'You have already completed attendance for today.'
+              : 'You are already signed in today.',
+          },
+          { status: 409 }
+        );
+      }
+
       const insertRes = await query(
         `INSERT INTO attendance_logs 
          (user_id, marked_at, latitude, longitude, distance_meters, is_within_geofence, status) 
@@ -173,13 +196,13 @@ export async function POST(request) {
 
       return NextResponse.json({
         success: true,
-        message: `Signed IN successfully at ${currentTimeFormatted}!`,
+        message: `Signed in at ${currentTimeFormatted}. You are ${roundedDistance} m from the office.`,
         log: insertRes.rows[0],
       });
     } else if (action === 'signout') {
       const todayLog = await query(
         `SELECT id FROM attendance_logs 
-         WHERE user_id = $1 AND signed_out_at IS NULL 
+         WHERE user_id = $1 AND ${officeDay('marked_at')} = ${officeToday()} AND signed_out_at IS NULL 
          ORDER BY marked_at DESC LIMIT 1`,
         [userId]
       );
@@ -187,7 +210,7 @@ export async function POST(request) {
       if (todayLog.rows.length === 0) {
         return NextResponse.json({
           success: false,
-          message: 'No active Sign-In record found. Please Sign In first!',
+          message: 'No open sign-in for today. Sign in before signing out.',
         });
       }
 
@@ -200,14 +223,16 @@ export async function POST(request) {
 
       return NextResponse.json({
         success: true,
-        message: `Signed OUT successfully at ${currentTimeFormatted}!`,
+        message: `Signed out at ${currentTimeFormatted}. You are ${roundedDistance} m from the office.`,
         log: updateRes.rows[0],
       });
     }
+
+    return NextResponse.json({ error: 'Unknown action.' }, { status: 400 });
   } catch (error) {
     console.error('Server error recording attendance:', error);
     return NextResponse.json(
-      { error: 'Server error: ' + error.message },
+      { error: databaseErrorMessage(error) },
       { status: 500 }
     );
   }

@@ -1,37 +1,36 @@
-// app/admin/page.js
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import BrandLockup from '@/components/BrandLockup';
+import { formatShortDate, formatTime } from '@/lib/format';
+
+function formatDistance(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const meters = Number(value);
+  if (Number.isNaN(meters)) return '—';
+  return `${Math.round(meters)} m`;
+}
+
+function Stat({ label, value, hint }) {
+  return (
+    <article className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">{label}</p>
+      <p className="mt-2 text-3xl font-semibold tracking-tight text-ink">{value}</p>
+      <p className="mt-1 text-xs text-slate-500">{hint}</p>
+    </article>
+  );
+}
 
 export default function AdminDashboard() {
   const [pin, setPin] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-
   const [logs, setLogs] = useState([]);
   const [staffList, setStaffList] = useState([]);
   const [filterDate, setFilterDate] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-
-  // Helper time format
-  const formatTime = (isoString) => {
-    if (!isoString) return '—';
-    return new Date(isoString).toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    });
-  };
-
-  // Helper date format
-  const formatDate = (isoString) => {
-    return new Date(isoString).toLocaleDateString('en-GB', {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    });
-  };
 
   const fetchDashboardData = async (adminPin, date = '') => {
     setLoading(true);
@@ -45,23 +44,29 @@ export default function AdminDashboard() {
         setLogs(data.logs);
         setStaffList(data.staff);
         setIsAuthenticated(true);
+      } else if (res.status === 401) {
+        setError(data.error || 'That PIN is not correct.');
       } else {
-        setError(data.error || 'Authentication failed');
+        setError(data.error || 'Could not load the dashboard.');
       }
-    } catch (err) {
-      setError('Failed to connect to admin server');
+    } catch {
+      setError('Could not reach the admin server.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleLogin = (e) => {
-    e.preventDefault();
+  const handleLogin = (event) => {
+    event.preventDefault();
     fetchDashboardData(pin, filterDate);
   };
 
   const handleResetDevice = async (userId, staffName) => {
-    if (!confirm(`Are you sure you want to unbind device for ${staffName}? They will be able to register a new phone on their next sign in.`)) {
+    if (
+      !window.confirm(
+        `Unlink the phone registered to ${staffName}? Their next sign-in will bind the phone they use.`
+      )
+    ) {
       return;
     }
 
@@ -73,195 +78,286 @@ export default function AdminDashboard() {
       });
       const data = await res.json();
       if (data.success) {
-        alert(data.message);
         fetchDashboardData(pin, filterDate);
       } else {
-        alert(data.error);
+        setError(data.error || 'Could not reset that device.');
       }
-    } catch (err) {
-      alert('Error resetting device.');
+    } catch {
+      setError('Could not reset that device.');
     }
   };
 
-  // Export to CSV
+  const query = searchQuery.trim().toLowerCase();
+
+  const filteredLogs = useMemo(
+    () =>
+      logs.filter(
+        (log) =>
+          !query ||
+          log.staff_name.toLowerCase().includes(query) ||
+          log.email.toLowerCase().includes(query)
+      ),
+    [logs, query]
+  );
+
+  const filteredStaff = useMemo(
+    () =>
+      staffList.filter(
+        (staff) =>
+          !query ||
+          staff.name.toLowerCase().includes(query) ||
+          staff.email.toLowerCase().includes(query)
+      ),
+    [staffList, query]
+  );
+
+  const openShifts = filteredLogs.filter((log) => !log.signed_out_at).length;
+  const outsideOffice = filteredLogs.filter((log) => log.is_within_geofence === false).length;
+
   const exportToCSV = () => {
-    if (logs.length === 0) return alert('No data to export.');
+    if (filteredLogs.length === 0) return;
 
     const headers = ['Staff Name,Email,Date,Sign In Time,Sign Out Time,Distance (m),Geofence'];
-    const rows = filteredLogs.map((l) => [
-      `"${l.staff_name}"`,
-      `"${l.email}"`,
-      `"${formatDate(l.marked_at)}"`,
-      `"${formatTime(l.marked_at)}"`,
-      `"${formatTime(l.signed_out_at)}"`,
-      l.distance_meters,
-      l.is_within_geofence ? 'Passed' : 'Failed',
-    ].join(','));
+    const rows = filteredLogs.map((log) =>
+      [
+        `"${log.staff_name}"`,
+        `"${log.email}"`,
+        `"${formatShortDate(log.marked_at)}"`,
+        `"${formatTime(log.marked_at)}"`,
+        `"${formatTime(log.signed_out_at)}"`,
+        log.distance_meters ?? '',
+        log.is_within_geofence ? 'Inside' : 'Outside',
+      ].join(',')
+    );
 
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers, ...rows].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    const csvContent = `data:text/csv;charset=utf-8,${[headers, ...rows].join('\n')}`;
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `attendance_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('href', encodeURI(csvContent));
+    link.setAttribute('download', `btel-attendance-${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  const filteredLogs = logs.filter((l) =>
-    l.staff_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    l.email.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  // login
   if (!isAuthenticated) {
     return (
-      <main className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="bg-white max-w-sm w-full rounded-2xl shadow-2xl p-6">
-          <div className="w-14 h-14 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-3 text-2xl font-bold">
-            🔒
-          </div>
-          <h1 className="text-xl font-bold text-slate-800 text-center">Admin Portal</h1>
-          <p className="text-xs text-slate-500 text-center mt-1 mb-5">
-            Enter the admin PIN.
-          </p>
+      <main className="flex min-h-screen items-center justify-center bg-ink px-4 py-10">
+        <div className="w-full max-w-sm rounded-3xl bg-white p-8 shadow-2xl">
+          <BrandLockup tone="dark" />
+          <h1 className="mt-8 text-2xl font-semibold tracking-tight text-ink">Admin</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Enter the PIN to review attendance and registered phones.</p>
 
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
+          <form onSubmit={handleLogin} className="mt-6 space-y-4">
+            <label className="block">
+              <span className="sr-only">Admin PIN</span>
               <input
                 type="password"
-                placeholder="Enter PIN"
+                inputMode="numeric"
+                autoComplete="current-password"
+                placeholder="PIN"
                 value={pin}
-                onChange={(e) => setPin(e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-xl text-center text-lg tracking-widest font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                onChange={(event) => setPin(event.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-center text-lg font-semibold tracking-[0.4em] text-ink outline-none focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
                 required
               />
-            </div>
-
+            </label>
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl shadow-md transition-all"
+              className="w-full rounded-xl bg-ink px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-[#16365c] disabled:cursor-not-allowed disabled:bg-slate-300"
             >
-              {loading ? 'Verifying...' : 'Unlock Dashboard ➔'}
+              {loading ? 'Checking PIN…' : 'Open dashboard'}
             </button>
           </form>
 
-          {error && <p className="mt-3 text-xs text-red-600 text-center">{error}</p>}
+          {error && (
+            <p role="alert" className="mt-4 rounded-xl bg-rose-50 px-3 py-2.5 text-sm text-rose-800 ring-1 ring-rose-200">
+              {error}
+            </p>
+          )}
+
+          <p className="mt-6 text-center text-xs text-slate-500">
+            <Link href="/" className="font-medium hover:text-ink">
+              Back to staff sign-in
+            </Link>
+          </p>
         </div>
       </main>
     );
   }
 
-  // dashbosrd
   return (
-    <main className="min-h-screen bg-slate-50 p-6">
-      <div className="max-w-6xl mx-auto space-y-6">
-        
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
-          <div>
-            <h1 className="text-2xl font-black text-slate-800">Btel Attendance Dashboard</h1>
-           
-          </div>
+    <main className="min-h-screen bg-background">
+      <header className="border-b-4 border-brand bg-ink text-white">
+        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <BrandLockup />
           <div className="flex gap-2">
             <button
+              type="button"
               onClick={exportToCSV}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow transition-all"
+              disabled={filteredLogs.length === 0}
+              className="rounded-lg bg-white px-3.5 py-2 text-xs font-semibold text-ink transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:bg-white/40 disabled:text-white"
             >
               Export CSV
             </button>
             <button
-              onClick={() => setIsAuthenticated(false)}
-              className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-semibold rounded-lg transition-all"
+              type="button"
+              onClick={() => {
+                setIsAuthenticated(false);
+                setPin('');
+                setError(null);
+              }}
+              className="rounded-lg px-3.5 py-2 text-xs font-semibold text-white/80 transition hover:bg-white/10 hover:text-white"
             >
-              Sign Out
+              Sign out
             </button>
           </div>
         </div>
+      </header>
 
-      
+      <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 sm:py-8">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-ink">Attendance</h1>
+          <p className="mt-1 text-sm text-slate-600">
+            {filterDate ? `Records for ${filterDate}.` : 'Latest records across the team.'}
+          </p>
+        </div>
 
-        {/* Filters */}
-        <div className="flex flex-col sm:flex-row gap-3 bg-white p-4 rounded-xl border border-slate-200">
+        <section className="grid gap-3 sm:grid-cols-3">
+          <Stat label="Records" value={filteredLogs.length} hint={filterDate ? 'On the selected day' : 'In the current view'} />
+          <Stat label="Open shifts" value={openShifts} hint="Signed in, not yet signed out" />
+          <Stat label="Outside office" value={outsideOffice} hint={`${staffList.length} registered staff`} />
+        </section>
+
+        <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:flex-row">
           <input
-            type="text"
-            placeholder="Search staff name or email..."
+            type="search"
+            placeholder="Search name or email"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500"
+            onChange={(event) => setSearchQuery(event.target.value)}
+            className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
           />
           <input
             type="date"
             value={filterDate}
-            onChange={(e) => {
-              setFilterDate(e.target.value);
-              fetchDashboardData(pin, e.target.value);
+            onChange={(event) => {
+              const nextDate = event.target.value;
+              setFilterDate(nextDate);
+              fetchDashboardData(pin, nextDate);
             }}
-            className="px-3 py-2 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500"
+            className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
           />
+          {filterDate && (
+            <button
+              type="button"
+              onClick={() => {
+                setFilterDate('');
+                fetchDashboardData(pin, '');
+              }}
+              className="rounded-xl px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              All dates
+            </button>
+          )}
         </div>
 
-        {/* Attendance Table */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs text-slate-600">
-              <thead className="bg-slate-50 text-[11px] uppercase font-bold text-slate-500 border-b border-slate-200">
-                <tr>
-                  <th className="p-3.5">Staff Name</th>
-                  <th className="p-3.5">Date</th>
-                  <th className="p-3.5">Sign In</th>
-                  <th className="p-3.5">Sign Out</th>
-                  <th className="p-3.5">Distance</th>
-                  <th className="p-3.5">Device Binding</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredLogs.length === 0 ? (
+        {error && (
+          <p role="alert" className="rounded-xl bg-rose-50 px-3.5 py-3 text-sm text-rose-800 ring-1 ring-rose-200">
+            {error}
+          </p>
+        )}
+
+        <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-sm">
+                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
                   <tr>
-                    <td colSpan={6} className="p-6 text-center text-slate-400">
-                      No attendance records found.
-                    </td>
+                    <th className="px-4 py-3 font-semibold">Staff</th>
+                    <th className="px-4 py-3 font-semibold">Date</th>
+                    <th className="px-4 py-3 font-semibold">Sign in</th>
+                    <th className="px-4 py-3 font-semibold">Sign out</th>
+                    <th className="px-4 py-3 font-semibold">Distance</th>
+                    <th className="px-4 py-3 font-semibold">Location</th>
                   </tr>
-                ) : (
-                  filteredLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="p-3.5">
-                        <div className="font-semibold text-slate-800">{log.staff_name}</div>
-                        <div className="text-[11px] text-slate-400">{log.email}</div>
-                      </td>
-                      <td className="p-3.5 font-medium">{formatDate(log.marked_at)}</td>
-                      <td className="p-3.5">
-                        <span className="font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded">
-                          {formatTime(log.marked_at)}
-                        </span>
-                      </td>
-                      <td className="p-3.5">
-                        <span
-                          className={`font-bold px-2 py-0.5 rounded ${
-                            log.signed_out_at
-                              ? 'text-red-700 bg-red-50 border border-red-200'
-                              : 'text-amber-600 bg-amber-50'
-                          }`}
-                        >
-                          {formatTime(log.signed_out_at)}
-                        </span>
-                      </td>
-                      <td className="p-3.5 text-slate-500">{log.distance_meters || 0}m</td>
-                      <td className="p-3.5">
-                        <button
-                          onClick={() => handleResetDevice(log.user_id, log.staff_name)}
-                          className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-medium"
-                        >
-                          Reset Device
-                        </button>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {loading ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">
+                        Loading records…
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  ) : filteredLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">
+                        No attendance records match this view.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredLogs.map((log) => (
+                      <tr key={log.id} className="align-top">
+                        <td className="px-4 py-3.5">
+                          <p className="font-medium text-ink">{log.staff_name}</p>
+                          <p className="mt-0.5 text-xs text-slate-500">{log.email}</p>
+                        </td>
+                        <td className="px-4 py-3.5 text-slate-700">{formatShortDate(log.marked_at)}</td>
+                        <td className="px-4 py-3.5 font-medium text-emerald-700">{formatTime(log.marked_at)}</td>
+                        <td className={`px-4 py-3.5 font-medium ${log.signed_out_at ? 'text-rose-700' : 'text-amber-700'}`}>
+                          {log.signed_out_at ? formatTime(log.signed_out_at) : 'Open'}
+                        </td>
+                        <td className="px-4 py-3.5 text-slate-600">{formatDistance(log.distance_meters)}</td>
+                        <td className="px-4 py-3.5">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                              log.is_within_geofence
+                                ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                                : 'bg-amber-50 text-amber-800 ring-1 ring-amber-200'
+                            }`}
+                          >
+                            {log.is_within_geofence ? 'Inside' : 'Outside'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-4 py-4">
+              <h2 className="text-sm font-semibold text-ink">Registered staff</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">Reset a phone when someone changes devices.</p>
+            </div>
+            <ul className="max-h-[32rem] divide-y divide-slate-100 overflow-y-auto">
+              {filteredStaff.length === 0 ? (
+                <li className="px-4 py-6 text-sm text-slate-500">No staff match this search.</li>
+              ) : (
+                filteredStaff.map((staff) => (
+                  <li key={staff.id} className="px-4 py-3.5">
+                    <p className="text-sm font-medium text-ink">{staff.name}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{staff.email}</p>
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <p className="text-xs text-slate-500">
+                        {staff.device_id ? `Phone linked · ${String(staff.device_id).slice(-6)}` : 'No phone linked'}
+                      </p>
+                      {staff.device_id && (
+                        <button
+                          type="button"
+                          onClick={() => handleResetDevice(staff.id, staff.name)}
+                          className="text-xs font-semibold text-brand hover:underline"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))
+              )}
+            </ul>
+          </aside>
         </div>
       </div>
     </main>

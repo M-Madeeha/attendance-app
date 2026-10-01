@@ -1,68 +1,58 @@
-// app/page.js
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import BrandLockup from '@/components/BrandLockup';
+import { formatClock, formatLongDate, formatShortDate, formatTime } from '@/lib/format';
+
+function getOrCreateDeviceId() {
+  if (typeof window === 'undefined') return '';
+  let id = localStorage.getItem('btel_device_id');
+  if (!id) {
+    id = `dev_${Math.random().toString(36).substring(2, 15)}_${Date.now().toString(36)}`;
+    localStorage.setItem('btel_device_id', id);
+  }
+  return id;
+}
+
+function Shell({ children }) {
+  return (
+    <main className="min-h-screen bg-background sm:px-4 sm:py-8">
+      <div className="mx-auto flex min-h-screen w-full max-w-md flex-col bg-white sm:min-h-[calc(100vh-4rem)] sm:overflow-hidden sm:rounded-[28px] sm:shadow-[0_24px_80px_-32px_rgba(12,35,64,0.45)] sm:ring-1 sm:ring-slate-200/80">
+        {children}
+      </div>
+    </main>
+  );
+}
+
+function Field({ label, ...props }) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-xs font-medium text-ink/70">{label}</span>
+      <input
+        {...props}
+        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-ink outline-none transition placeholder:text-slate-400 focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
+      />
+    </label>
+  );
+}
 
 export default function StaffAttendanceApp() {
+  const [booting, setBooting] = useState(true);
+  const [now, setNow] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
-
-  // Today's attendance state from database
   const [todayLog, setTodayLog] = useState(null);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
 
-  const todayFormattedDate = new Date().toLocaleDateString('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
-
-  // Helper to format ISO timestamp to "9:05 AM"
-  const formatTimeOnly = (isoString) => {
-    if (!isoString) return null;
-    return new Date(isoString).toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    });
-  };
-
-  // Helper to format date for history: "13 Aug 2026"
-  const formatDateOnly = (isoString) => {
-    return new Date(isoString).toLocaleDateString('en-GB', {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    });
-  };
-  // Helper to get or create a persistent device identifier
-function getOrCreateDeviceId() {
-  if (typeof window === 'undefined') return '';
-  let id = localStorage.getItem('btel_device_id');
-  if (!id) {
-    id = 'dev_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now().toString(36);
-    localStorage.setItem('btel_device_id', id);
-  }
-  return id;
-}
-
-  // 1. Fetch latest attendance state from DB
-const [mounted, setMounted] = useState(false);
-
-  // Sync attendance safely from DB
   const syncAttendanceData = async (userEmail) => {
     try {
       const res = await fetch(`/api/attendance?email=${encodeURIComponent(userEmail)}`);
-      if (!res.ok) {
-        console.error('Server returned error status:', res.status);
-        return;
-      }
       const data = await res.json();
       if (data.success) {
         setTodayLog(data.todayLog);
@@ -73,24 +63,32 @@ const [mounted, setMounted] = useState(false);
     }
   };
 
-useEffect(() => {
-    setMounted(true);
+  useEffect(() => {
+    setNow(new Date());
+    const timer = setInterval(() => setNow(new Date()), 30000);
+
     const savedUser = localStorage.getItem('staff_profile');
-    if (savedUser) {
+    if (!savedUser) {
+      setBooting(false);
+      return () => clearInterval(timer);
+    }
+
+    try {
       const parsedUser = JSON.parse(savedUser);
       setUserProfile(parsedUser);
-      syncAttendanceData(parsedUser.email);
+      syncAttendanceData(parsedUser.email).finally(() => setBooting(false));
+    } catch {
+      localStorage.removeItem('staff_profile');
+      setBooting(false);
     }
+
+    return () => clearInterval(timer);
   }, []);
 
-  // Avoid server/client hydration mismatch during first paint
-  if (!mounted) return null;
-
-  // Save profile setup
-  const handleSaveProfile = (e) => {
-    e.preventDefault();
+  const handleSaveProfile = (event) => {
+    event.preventDefault();
     if (!email.trim() || !password.trim() || !fullName.trim()) {
-      setMessage({ type: 'error', text: 'Please fill in all fields.' });
+      setMessage({ type: 'error', text: 'Enter your name, email, and password.' });
       return;
     }
 
@@ -102,26 +100,29 @@ useEffect(() => {
 
     localStorage.setItem('staff_profile', JSON.stringify(profile));
     setUserProfile(profile);
-    syncAttendanceData(profile.email);
     setMessage(null);
+    syncAttendanceData(profile.email);
   };
 
-  // Switch Account / Logout
   const handleSwitchAccount = () => {
+    if (!window.confirm('Remove the saved profile from this phone?')) return;
     localStorage.removeItem('staff_profile');
     setUserProfile(null);
+    setFullName('');
+    setEmail('');
+    setPassword('');
     setTodayLog(null);
     setHistory([]);
+    setShowHistory(false);
     setMessage(null);
   };
 
-  // 3. Mark Attendance (Sign In / Sign Out)
   const handleAttendance = (action) => {
     setMessage(null);
     setLoading(true);
 
     if (!navigator.geolocation) {
-      setMessage({ type: 'error', text: 'Geolocation is not supported by your browser.' });
+      setMessage({ type: 'error', text: 'This browser cannot read your location.' });
       setLoading(false);
       return;
     }
@@ -129,7 +130,7 @@ useEffect(() => {
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         try {
-         const res = await fetch('/api/attendance', {
+          const res = await fetch('/api/attendance', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -139,7 +140,7 @@ useEffect(() => {
               latitude: position.coords.latitude,
               longitude: position.coords.longitude,
               action,
-              deviceId: getOrCreateDeviceId(), // <-- Sends phone's unique key
+              deviceId: getOrCreateDeviceId(),
             }),
           });
 
@@ -149,190 +150,208 @@ useEffect(() => {
             setMessage({ type: 'success', text: data.message });
             await syncAttendanceData(userProfile.email);
           } else {
-            setMessage({ type: 'error', text: data.message || data.error });
+            setMessage({
+              type: 'error',
+              text: data.message || data.error || 'Could not record attendance.',
+            });
           }
-        } catch (err) {
-          setMessage({ type: 'error', text: 'Server connection failed.' });
+        } catch {
+          setMessage({ type: 'error', text: 'Could not reach the attendance server.' });
         } finally {
           setLoading(false);
         }
       },
-      () => {
+      (error) => {
         setLoading(false);
-        setMessage({ type: 'error', text: 'Location access denied. Please enable GPS.' });
+        setMessage({
+          type: 'error',
+          text:
+            error.code === 1
+              ? 'Location access was denied. Allow it in your browser settings and try again.'
+              : 'Could not read your location. Move closer to a window and try again.',
+        });
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
   };
 
-  return (
-    <main className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
-      <div className="bg-white max-w-sm w-full rounded-2xl shadow-xl p-6 border border-slate-200">
-        
-        {/* Company Logo */}
-        <div className="w-16 h-16 mx-auto mb-3 flex items-center justify-center">
-          <img src="/BtelLogo.jpg" alt="Btel Logo" className="h-full w-auto object-contain" />
-        </div>
+  const pastRecords = history.filter((item) => !todayLog || item.id !== todayLog.id);
+  const shiftComplete = Boolean(todayLog?.signed_out_at);
 
-        {/* --- STEP 1: CREATE PROFILE (Only shown first time) --- */}
-        {!userProfile ? (
+  return (
+    <Shell>
+      <header className="border-b-4 border-brand bg-ink px-6 pb-6 pt-7 text-white">
+        <div className="flex items-start justify-between gap-4">
+          <BrandLockup />
+          {now && (
+            <div className="text-right">
+              <p className="text-sm font-medium tabular-nums">{formatClock(now)}</p>
+              <p className="mt-1 max-w-36 text-xs leading-5 text-white/65">{formatLongDate(now)}</p>
+            </div>
+          )}
+        </div>
+      </header>
+
+      <div className="flex flex-1 flex-col px-6 py-6">
+        {booting ? (
+          <div className="space-y-3" aria-hidden="true">
+            <div className="h-4 w-28 animate-pulse rounded bg-slate-200" />
+            <div className="h-11 animate-pulse rounded-xl bg-slate-100" />
+            <div className="h-11 animate-pulse rounded-xl bg-slate-100" />
+            <div className="h-11 animate-pulse rounded-xl bg-slate-100" />
+          </div>
+        ) : !userProfile ? (
           <div>
-            <h1 className="text-xl font-bold text-slate-800 text-center">Create Profile</h1>
-            <p className="text-xs text-slate-500 text-center mt-1 mb-5">
-              Set up your profile.
+            <h1 className="text-2xl font-semibold tracking-tight text-ink">Set up your profile</h1>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              This phone is linked to your account after the first sign-in. Use the password you already registered with.
             </p>
 
-            <form onSubmit={handleSaveProfile} className="space-y-3 mb-6">
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Ahmad Musa"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Email Address</label>
-                <input
-                  type="email"
-                  placeholder="ahmad.musa@btel.com.ng"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Password</label>
-                <input
-                  type="password"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-
+            <form onSubmit={handleSaveProfile} className="mt-6 space-y-4">
+              <Field
+                label="Full name"
+                type="text"
+                name="name"
+                autoComplete="name"
+                placeholder="Ahmad Musa"
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                required
+              />
+              <Field
+                label="Email"
+                type="email"
+                name="email"
+                autoComplete="email"
+                spellCheck={false}
+                placeholder="ahmad.musa@btel.com.ng"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                required
+              />
+              <Field
+                label="Password"
+                type="password"
+                name="password"
+                autoComplete="current-password"
+                placeholder="Your account password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
               <button
                 type="submit"
-                className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 font-semibold text-white text-sm rounded-xl shadow-md transition-all mt-2"
+                className="mt-2 w-full rounded-xl bg-brand px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-[#008fc7] active:scale-[0.99]"
               >
-                Save & Continue ➔
+                Continue
               </button>
             </form>
           </div>
         ) : (
-          /* --- STEP 2: DAILY ATTENDANCE DASHBOARD --- */
-          <div>
-            {/* User Header */}
-            <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
+          <div className="flex flex-1 flex-col">
+            <div className="flex items-start justify-between gap-3">
               <div>
-                <span className="text-xs font-medium text-slate-400">Welcome back,</span>
-                <h2 className="text-sm font-bold text-slate-800">{userProfile.fullName}</h2>
+                <h1 className="text-xl font-semibold tracking-tight text-ink">{userProfile.fullName}</h1>
+                <p className="mt-0.5 text-xs text-slate-500">{userProfile.email}</p>
               </div>
-              <button onClick={handleSwitchAccount} className="text-xs text-red-500 hover:underline">
-                Switch
+              <button
+                type="button"
+                onClick={handleSwitchAccount}
+                className="shrink-0 text-xs font-medium text-slate-500 underline-offset-2 hover:text-ink hover:underline"
+              >
+                Switch profile
               </button>
             </div>
 
-            {/* NOT SIGNED IN TODAY */}
             {!todayLog ? (
-              <div className="my-6 text-center">
-                <p className="text-xs text-slate-500 mb-3 font-medium">{todayFormattedDate}</p>
+              <section className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Today</p>
+                <h2 className="mt-2 text-lg font-semibold text-ink">Not signed in</h2>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  Sign in only works while you are at the office. Your location is checked when you tap the button.
+                </p>
                 <button
+                  type="button"
                   onClick={() => handleAttendance('signin')}
                   disabled={loading}
-                  className={`w-full py-3.5 px-4 rounded-xl font-semibold text-white shadow-md text-sm transition-all ${
-                    loading ? 'bg-slate-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 active:scale-98'
-                  }`}
+                  className="mt-5 w-full rounded-xl bg-emerald-600 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-emerald-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
-                  {loading ? 'Locating GPS...' : 'Sign In 🟢'}
+                  {loading ? 'Finding your location…' : 'Sign in'}
                 </button>
-              </div>
+              </section>
             ) : (
-              /* SIGNED IN TODAY -> SHOW TODAY'S SUMMARY */
-              <div className="mt-2 mb-4">
-                <div className="bg-blue-50 border border-blue-200 rounded-t-xl p-2.5 text-center">
-                  <p className="text-xs font-bold text-blue-900">{todayFormattedDate}</p>
-                </div>
-
-                <div className="border border-t-0 border-slate-200 rounded-b-xl p-3 bg-slate-50 space-y-2 text-xs">
-                  <div className="flex justify-between items-center border-b pb-2">
-                    <span className="text-slate-500">Staff Name:</span>
-                    <span className="font-semibold text-slate-800">{userProfile.fullName}</span>
-                  </div>
-
-                  <div className="flex justify-between items-center border-b pb-2">
-                    <span className="text-slate-500">Sign In Time:</span>
-                    <span className="font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded">
-                      {formatTimeOnly(todayLog.marked_at)}
-                    </span>
-                  </div>
-
-                  {todayLog.signed_out_at && (
-                    <div className="flex justify-between items-center pt-1">
-                      <span className="text-slate-500">Sign Out Time:</span>
-                      <span className="font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded">
-                        {formatTimeOnly(todayLog.signed_out_at)}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Sign Out Button (Hides once signed out) */}
-                {!todayLog.signed_out_at ? (
-                  <button
-                    onClick={() => handleAttendance('signout')}
-                    disabled={loading}
-                    className={`w-full mt-4 py-3 px-4 rounded-xl font-semibold text-white shadow-md text-sm transition-all ${
-                      loading ? 'bg-slate-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700 active:scale-98'
+              <section className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Today</p>
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                      shiftComplete ? 'bg-brand/10 text-[#08648c]' : 'bg-emerald-100 text-emerald-800'
                     }`}
                   >
-                    {loading ? 'Locating GPS...' : 'Sign Out 🔴'}
-                  </button>
-                ) : (
-                  <div className="mt-3 p-2 bg-green-50 border border-green-200 rounded-lg text-center text-xs font-medium text-green-800">
-                    ✅ Completed shift for today!
+                    {shiftComplete ? 'Shift complete' : 'On site'}
+                  </span>
+                </div>
+
+                <dl className="mt-4 space-y-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-slate-500">Sign in</dt>
+                    <dd className="font-semibold text-emerald-700">{formatTime(todayLog.marked_at)}</dd>
                   </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="text-slate-500">Sign out</dt>
+                    <dd className={`font-semibold ${shiftComplete ? 'text-rose-700' : 'text-slate-400'}`}>
+                      {shiftComplete ? formatTime(todayLog.signed_out_at) : 'Still on site'}
+                    </dd>
+                  </div>
+                </dl>
+
+                {shiftComplete ? (
+                  <p className="mt-5 rounded-xl bg-white px-3 py-3 text-center text-sm text-ink ring-1 ring-slate-200">
+                    Today&apos;s attendance is complete.
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleAttendance('signout')}
+                    disabled={loading}
+                    className="mt-5 w-full rounded-xl bg-rose-600 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-rose-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {loading ? 'Finding your location…' : 'Sign out'}
+                  </button>
                 )}
-              </div>
+              </section>
             )}
 
-            {/* Past History Trigger Button */}
             <button
-              onClick={() => setShowHistory(!showHistory)}
-              className="w-full mt-2 py-2 px-3 text-xs text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg font-medium transition-all"
+              type="button"
+              onClick={() => setShowHistory((open) => !open)}
+              className="mt-4 w-full rounded-xl px-3 py-2.5 text-sm font-medium text-ink/80 transition hover:bg-slate-50"
+              aria-expanded={showHistory}
             >
-              {showHistory ? 'Hide History ▲' : 'View Past Attendance 📅'}
+              {showHistory ? 'Hide earlier attendance' : 'View earlier attendance'}
             </button>
 
-            {/* Attendance History Accordion / List */}
             {showHistory && (
-              <div className="mt-3 border-t border-slate-200 pt-3 max-h-48 overflow-y-auto space-y-2">
-                <p className="text-[11px] font-bold text-slate-600 uppercase tracking-wide">Past Records</p>
-                {history.length === 0 ? (
-                  <p className="text-xs text-slate-400">No previous logs found.</p>
+              <div className="mt-1 border-t border-slate-200 pt-3">
+                {pastRecords.length === 0 ? (
+                  <p className="py-3 text-sm text-slate-500">Earlier visits will show up here.</p>
                 ) : (
-                  history.map((item) => (
-                    <div key={item.id} className="p-2 bg-slate-50 border border-slate-200 rounded text-xs">
-                      <div className="flex justify-between font-semibold text-slate-700 mb-1">
-                        <span>{formatDateOnly(item.marked_at)}</span>
-                        <span className="text-green-600">IN: {formatTimeOnly(item.marked_at)}</span>
-                      </div>
-                      <div className="flex justify-between text-slate-500 text-[11px]">
-                        <span>Status: Present</span>
-                        <span className={item.signed_out_at ? 'text-red-600' : 'text-slate-400'}>
-                          OUT: {item.signed_out_at ? formatTimeOnly(item.signed_out_at) : '—'}
-                        </span>
-                      </div>
-                    </div>
-                  ))
+                  <ul className="max-h-64 overflow-y-auto">
+                    {pastRecords.map((item) => (
+                      <li
+                        key={item.id}
+                        className="flex items-center justify-between gap-3 border-b border-slate-100 py-3 last:border-0"
+                      >
+                        <div>
+                          <p className="text-sm font-medium text-ink">{formatShortDate(item.marked_at)}</p>
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            Out {item.signed_out_at ? formatTime(item.signed_out_at) : '—'}
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold text-emerald-700">{formatTime(item.marked_at)}</p>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
             )}
@@ -341,16 +360,23 @@ useEffect(() => {
 
         {message && (
           <div
-            className={`mt-4 p-3 rounded-lg text-xs font-medium text-center ${
+            role="alert"
+            className={`mt-4 rounded-xl px-3.5 py-3 text-sm leading-5 ${
               message.type === 'success'
-                ? 'bg-green-100 text-green-800 border border-green-300'
-                : 'bg-red-100 text-red-800 border border-red-300'
+                ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200'
+                : 'bg-rose-50 text-rose-900 ring-1 ring-rose-200'
             }`}
           >
             {message.text}
           </div>
         )}
+
+        <p className="mt-auto pt-8 text-center text-xs text-slate-400">
+          <Link href="/admin" className="font-medium text-slate-500 hover:text-ink">
+            Admin
+          </Link>
+        </p>
       </div>
-    </main>
+    </Shell>
   );
 }

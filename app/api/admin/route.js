@@ -1,6 +1,7 @@
 // app/api/admin/route.js
 import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import { databaseErrorMessage, query } from '@/lib/db';
+import { officeDay } from '@/lib/office-time';
 
 const ADMIN_PIN = process.env.ADMIN_PIN || '1234'; // Set your admin PIN here or in .env.local
 
@@ -12,7 +13,7 @@ export async function GET(request) {
     const selectedDate = searchParams.get('date'); // e.g. YYYY-MM-DD
 
     if (pin !== ADMIN_PIN) {
-      return NextResponse.json({ error: 'Unauthorized access' }, { status: 401 });
+      return NextResponse.json({ error: 'That PIN is not correct.' }, { status: 401 });
     }
 
     // 1. Fetch attendance logs (filtered by date if provided)
@@ -34,7 +35,7 @@ export async function GET(request) {
 
     const params = [];
     if (selectedDate) {
-      logsQuery += ` WHERE DATE(al.marked_at) = $1`;
+      logsQuery += ` WHERE ${officeDay('al.marked_at')} = $1::date`;
       params.push(selectedDate);
     }
 
@@ -52,7 +53,7 @@ export async function GET(request) {
     });
   } catch (error) {
     console.error('Admin API error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: databaseErrorMessage(error) }, { status: 500 });
   }
 }
 
@@ -62,7 +63,7 @@ export async function POST(request) {
     const { pin, action, userId } = await request.json();
 
     if (pin !== ADMIN_PIN) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'That PIN is not correct.' }, { status: 401 });
     }
 
     if (action === 'reset_device') {
@@ -72,6 +73,6 @@ export async function POST(request) {
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: databaseErrorMessage(error) }, { status: 500 });
   }
 }
