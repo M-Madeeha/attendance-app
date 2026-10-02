@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           Int             @id @default(autoincrement())
+  name         String
+  email        String          @unique
+  passwordHash String          @map("password_hash")
+  role         String          @default("staff")
+  deviceId     String?         @map("device_id")
+  authTokenHash String?        @map("auth_token_hash")
+  logs          AttendanceLog[]
+  alerts        AdminAlert[]
+
+  @@map("users")
+}
+
+model OfficeLocation {
+  id           Int     @id @default(autoincrement())
+  latitude     Decimal @db.Decimal(10, 7)
+  longitude    Decimal @db.Decimal(10, 7)
+  radiusMeters Int     @default(100) @map("radius_meters")
+
+  @@map("office_locations")
+}
+
+model AttendanceLog {
+  id               Int       @id @default(autoincrement())
+  userId           Int       @map("user_id")
+  user             User      @relation(fields: [userId], references: [id])
+  markedAt         DateTime  @default(now()) @map("marked_at") @db.Timestamptz(6)
+  signedOutAt      DateTime? @map("signed_out_at") @db.Timestamptz(6)
+  latitude         Decimal?  @db.Decimal(10, 7)
+  longitude        Decimal?  @db.Decimal(10, 7)
+  distanceMeters   Decimal?  @map("distance_meters") @db.Decimal(12, 2)
+  isWithinGeofence Boolean?  @map("is_within_geofence")
+  status           String?
+  lateArrival      Boolean   @default(false) @map("late_arrival")
+  earlyDeparture   Boolean   @default(false) @map("early_departure")
+  syncedFromOffline Boolean  @default(false) @map("synced_from_offline")
+
+  @@index([userId, markedAt])
+  @@map("attendance_logs")
+}
+
+model AdminAlert {
+  id        Int       @id @default(autoincrement())
+  type      String
+  message   String
+  userId    Int?      @map("user_id")
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  readAt    DateTime? @map("read_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("admin_alerts")
+}

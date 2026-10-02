@@ -1,24 +1,18 @@
-import Image from "next/image";
-
 export default function BrandLockup({ tone = "light" }) {
   const onDark = tone === "light";
 
   return (
-    <div className="flex items-center gap-3">
-      <Image
-        src="/BtelLogo.jpg"
-        alt="Btel"
-        width={44}
-        height={44}
-        className="h-11 w-11 rounded-xl object-cover shadow-sm"
-        priority
-      />
-      <div>
-        <p className={`text-base font-semibold leading-none tracking-tight ${onDark ? "text-white" : "text-ink"}`}>
-          Btel
-        </p>
-        <p className={`mt-1 text-xs ${onDark ? "text-white/65" : "text-slate-500"}`}>Attendance</p>
-      </div>
+    <div className="flex flex-col items-center gap-1.5">
+      <span
+        className={
+          onDark
+            ? "inline-flex items-center"
+            : "inline-flex items-center rounded-lg bg-ink px-2.5 py-2 dark:bg-transparent dark:px-0 dark:py-0"
+        }
+      >
+        <img src="/btel-logo.svg" alt="Btel" className="h-6 w-auto" />
+      </span>
+      <p className={`text-xs font-medium ${onDark ? "text-white/70" : "text-slate-500"}`}>Attendance</p>
     </div>
   );
 }

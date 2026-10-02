@@ -1,9 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import BrandLockup from '@/components/BrandLockup';
+import ThemeToggle from '@/components/ThemeToggle';
 import { formatClock, formatLongDate, formatShortDate, formatTime } from '@/lib/format';
+import {
+  cacheAttendance,
+  enqueueOfflineAttendance,
+  readCachedAttendance,
+  readOfflineQueue,
+  writeOfflineQueue,
+} from '@/lib/offline-queue';
+import { arrivalNotice, departureNotice, OFFICE_END_LABEL } from '@/lib/schedule';
 
 function getOrCreateDeviceId() {
   if (typeof window === 'undefined') return '';
@@ -13,6 +22,13 @@ function getOrCreateDeviceId() {
     localStorage.setItem('btel_device_id', id);
   }
   return id;
+}
+
+function storeProfile(profile) {
+  const stored = { ...profile };
+  if (stored.authToken) delete stored.password;
+  localStorage.setItem('staff_profile', JSON.stringify(stored));
+  return stored;
 }
 
 function Shell({ children }) {
@@ -37,6 +53,24 @@ function Field({ label, ...props }) {
   );
 }
 
+function NoticeList({ log }) {
+  const notices = [];
+  if (log?.late_arrival) notices.push('Late arrival');
+  if (log?.early_departure) notices.push('Early departure');
+  if (log?.pending || log?.synced_from_offline) notices.push(log?.pending ? 'Waiting to sync' : 'Synced from this phone');
+  if (notices.length === 0) return null;
+
+  return (
+    <ul className="mt-4 flex flex-wrap gap-2">
+      {notices.map((notice) => (
+        <li key={notice} className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900 ring-1 ring-amber-200">
+          {notice}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function StaffAttendanceApp() {
   const [booting, setBooting] = useState(true);
   const [now, setNow] = useState(null);
@@ -49,6 +83,19 @@ export default function StaffAttendanceApp() {
   const [todayLog, setTodayLog] = useState(null);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [offline, setOffline] = useState(false);
+  const profileRef = useRef(null);
+  const flushing = useRef(false);
+
+  profileRef.current = userProfile;
+
+  const rememberProfile = (profile) => {
+    const stored = storeProfile(profile);
+    profileRef.current = stored;
+    setUserProfile(stored);
+    return stored;
+  };
 
   const syncAttendanceData = async (userEmail) => {
     try {
@@ -57,32 +104,118 @@ export default function StaffAttendanceApp() {
       if (data.success) {
         setTodayLog(data.todayLog);
         setHistory(data.history || []);
+        cacheAttendance(userEmail, { todayLog: data.todayLog, history: data.history || [] });
+        return true;
       }
     } catch (err) {
       console.error('Failed to sync attendance:', err);
+      const cached = readCachedAttendance(userEmail);
+      if (cached) {
+        setTodayLog(cached.todayLog);
+        setHistory(cached.history || []);
+      }
     }
+    return false;
+  };
+
+  const flushQueue = async () => {
+    if (flushing.current) return;
+    const profile = profileRef.current;
+    if (!profile) return;
+
+    const queued = readOfflineQueue().filter((item) => item.email === profile.email);
+    const others = readOfflineQueue().filter((item) => item.email !== profile.email);
+    if (queued.length === 0) {
+      setPendingCount(0);
+      return;
+    }
+
+    flushing.current = true;
+    const remaining = [];
+    let latestToken = profile.authToken;
+    let droppedMessage = null;
+
+    for (const item of queued) {
+      try {
+        const res = await fetch('/api/attendance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...item.payload,
+            authToken: latestToken || item.payload.authToken,
+            password: latestToken ? undefined : item.payload.password,
+          }),
+        });
+        const data = await res.json();
+        if (res.status >= 400 && res.status < 500) {
+          droppedMessage = data.message || data.error || 'A saved record could not be synced.';
+          continue;
+        }
+        if (!res.ok || !data.success) {
+          remaining.push(item);
+          continue;
+        }
+        if (data.authToken) latestToken = data.authToken;
+      } catch {
+        remaining.push(item);
+      }
+    }
+
+    writeOfflineQueue([...others, ...remaining]);
+    setPendingCount(remaining.length);
+    flushing.current = false;
+
+    if (latestToken && latestToken !== profile.authToken) {
+      rememberProfile({ ...profile, authToken: latestToken });
+    }
+    if (droppedMessage) setMessage({ type: 'error', text: droppedMessage });
+    if (remaining.length === 0) await syncAttendanceData(profile.email);
   };
 
   useEffect(() => {
     setNow(new Date());
+    setOffline(!navigator.onLine);
     const timer = setInterval(() => setNow(new Date()), 30000);
+    const onOnline = () => {
+      setOffline(false);
+      flushQueue();
+    };
+    const onOffline = () => setOffline(true);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
 
     const savedUser = localStorage.getItem('staff_profile');
     if (!savedUser) {
       setBooting(false);
-      return () => clearInterval(timer);
+      return () => {
+        clearInterval(timer);
+        window.removeEventListener('online', onOnline);
+        window.removeEventListener('offline', onOffline);
+      };
     }
 
     try {
       const parsedUser = JSON.parse(savedUser);
+      profileRef.current = parsedUser;
       setUserProfile(parsedUser);
-      syncAttendanceData(parsedUser.email).finally(() => setBooting(false));
+      setPendingCount(readOfflineQueue().filter((item) => item.email === parsedUser.email).length);
+      syncAttendanceData(parsedUser.email)
+        .finally(() => setBooting(false))
+        .then(() => flushQueue());
     } catch {
       localStorage.removeItem('staff_profile');
       setBooting(false);
     }
 
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
   }, []);
 
   const handleSaveProfile = (event) => {
@@ -92,14 +225,11 @@ export default function StaffAttendanceApp() {
       return;
     }
 
-    const profile = {
+    const profile = rememberProfile({
       fullName: fullName.trim(),
       email: email.trim().toLowerCase(),
       password: password.trim(),
-    };
-
-    localStorage.setItem('staff_profile', JSON.stringify(profile));
-    setUserProfile(profile);
+    });
     setMessage(null);
     syncAttendanceData(profile.email);
   };
@@ -107,6 +237,7 @@ export default function StaffAttendanceApp() {
   const handleSwitchAccount = () => {
     if (!window.confirm('Remove the saved profile from this phone?')) return;
     localStorage.removeItem('staff_profile');
+    profileRef.current = null;
     setUserProfile(null);
     setFullName('');
     setEmail('');
@@ -114,6 +245,7 @@ export default function StaffAttendanceApp() {
     setTodayLog(null);
     setHistory([]);
     setShowHistory(false);
+    setPendingCount(0);
     setMessage(null);
   };
 
@@ -129,26 +261,62 @@ export default function StaffAttendanceApp() {
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
+        const profile = profileRef.current;
+        const recordedAt = new Date().toISOString();
+        const payload = {
+          fullName: profile.fullName,
+          email: profile.email,
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          action,
+          deviceId: getOrCreateDeviceId(),
+          recordedAt,
+          offline: true,
+        };
+        if (profile.authToken) payload.authToken = profile.authToken;
+        else payload.password = profile.password;
+
+        const saveLocally = () => {
+          const queue = enqueueOfflineAttendance({ email: profile.email, payload });
+          setPendingCount(queue.filter((item) => item.email === profile.email).length);
+          const when = new Date(recordedAt);
+          if (action === 'signin') {
+            const arrival = arrivalNotice(when);
+            setTodayLog({
+              id: `pending-${recordedAt}`,
+              marked_at: recordedAt,
+              signed_out_at: null,
+              late_arrival: arrival.late,
+              early_departure: false,
+              pending: true,
+            });
+          } else {
+            const departure = departureNotice(when);
+            setTodayLog((current) => ({
+              ...(current || { id: `pending-${recordedAt}`, marked_at: recordedAt }),
+              signed_out_at: recordedAt,
+              early_departure: departure.early,
+              pending: true,
+            }));
+          }
+          setMessage({
+            type: 'success',
+            text: 'Saved on this phone. It will sync when the connection is back.',
+          });
+        };
+
         try {
           const res = await fetch('/api/attendance', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fullName: userProfile.fullName,
-              email: userProfile.email,
-              password: userProfile.password,
-              latitude: position.coords.latitude,
-              longitude: position.coords.longitude,
-              action,
-              deviceId: getOrCreateDeviceId(),
-            }),
+            body: JSON.stringify({ ...payload, offline: false }),
           });
-
           const data = await res.json();
 
           if (data.success) {
+            if (data.authToken) rememberProfile({ ...profile, authToken: data.authToken });
             setMessage({ type: 'success', text: data.message });
-            await syncAttendanceData(userProfile.email);
+            await syncAttendanceData(profile.email);
           } else {
             setMessage({
               type: 'error',
@@ -156,7 +324,7 @@ export default function StaffAttendanceApp() {
             });
           }
         } catch {
-          setMessage({ type: 'error', text: 'Could not reach the attendance server.' });
+          saveLocally();
         } finally {
           setLoading(false);
         }
@@ -180,15 +348,18 @@ export default function StaffAttendanceApp() {
 
   return (
     <Shell>
-      <header className="border-b-4 border-brand bg-ink px-6 pb-6 pt-7 text-white">
+      <header className="chrome border-b-4 border-brand bg-ink px-6 pb-6 pt-7 text-white">
         <div className="flex items-start justify-between gap-4">
           <BrandLockup />
-          {now && (
-            <div className="text-right">
-              <p className="text-sm font-medium tabular-nums">{formatClock(now)}</p>
-              <p className="mt-1 max-w-36 text-xs leading-5 text-white/65">{formatLongDate(now)}</p>
-            </div>
-          )}
+          <div className="flex flex-col items-end gap-2">
+            <ThemeToggle />
+            {now && (
+              <div className="text-right">
+                <p className="text-sm font-medium tabular-nums">{formatClock(now)}</p>
+                <p className="mt-1 max-w-36 text-xs leading-5 text-white/65">{formatLongDate(now)}</p>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -263,12 +434,20 @@ export default function StaffAttendanceApp() {
               </button>
             </div>
 
+            {(offline || pendingCount > 0) && (
+              <p className="mt-4 rounded-xl bg-amber-50 px-3.5 py-3 text-sm leading-5 text-amber-950 ring-1 ring-amber-200">
+                {offline
+                  ? 'You are offline. Attendance stays on this phone and syncs when you reconnect.'
+                  : `${pendingCount} attendance ${pendingCount === 1 ? 'record is' : 'records are'} waiting to sync.`}
+              </p>
+            )}
+
             {!todayLog ? (
               <section className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Today</p>
                 <h2 className="mt-2 text-lg font-semibold text-ink">Not signed in</h2>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
-                  Sign in only works while you are at the office. Your location is checked when you tap the button.
+                  Sign in only works while you are at the office. Arrivals after 9:15 AM are marked late. Leaving before {OFFICE_END_LABEL} is marked early.
                 </p>
                 <button
                   type="button"
@@ -304,6 +483,8 @@ export default function StaffAttendanceApp() {
                     </dd>
                   </div>
                 </dl>
+
+                <NoticeList log={todayLog} />
 
                 {shiftComplete ? (
                   <p className="mt-5 rounded-xl bg-white px-3 py-3 text-center text-sm text-ink ring-1 ring-slate-200">
@@ -346,6 +527,8 @@ export default function StaffAttendanceApp() {
                           <p className="text-sm font-medium text-ink">{formatShortDate(item.marked_at)}</p>
                           <p className="mt-0.5 text-xs text-slate-500">
                             Out {item.signed_out_at ? formatTime(item.signed_out_at) : '—'}
+                            {item.late_arrival ? ' · Late' : ''}
+                            {item.early_departure ? ' · Early' : ''}
                           </p>
                         </div>
                         <p className="text-sm font-semibold text-emerald-700">{formatTime(item.marked_at)}</p>

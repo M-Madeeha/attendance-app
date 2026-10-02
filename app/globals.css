@@ -1,10 +1,25 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: #e7eef5;
   --foreground: #0c2340;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --muted: #64748b;
+  --line: #e2e8f0;
   --brand: #00a3e0;
   --ink: #0c2340;
+}
+
+.dark {
+  --background: #07111c;
+  --foreground: #e8eef6;
+  --surface: #122033;
+  --surface-muted: #0c1a2c;
+  --muted: #94a3b8;
+  --line: rgba(255, 255, 255, 0.12);
 }
 
 @theme inline {
@@ -25,4 +40,83 @@ body {
 button,
 input {
   font: inherit;
+}
+
+.dark .bg-white {
+  background-color: var(--surface);
+}
+
+.dark .bg-slate-50 {
+  background-color: var(--surface-muted);
+}
+
+.dark .bg-slate-100,
+.dark .bg-slate-200 {
+  background-color: #1a2d44;
+}
+
+.dark .text-ink,
+.dark .hover\:text-ink:hover {
+  color: var(--foreground);
+}
+
+.dark .text-ink\/70,
+.dark .text-ink\/80 {
+  color: color-mix(in srgb, var(--foreground) 75%, transparent);
+}
+
+.dark .text-slate-400,
+.dark .text-slate-500,
+.dark .text-slate-600,
+.dark .text-slate-700,
+.dark .placeholder\:text-slate-400::placeholder {
+  color: var(--muted);
+}
+
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--line);
+}
+
+.dark .ring-slate-200,
+.dark .ring-slate-200\/80,
+.dark .sm\:ring-slate-200\/80 {
+  --tw-ring-color: var(--line);
+}
+
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-100:hover,
+.dark .hover\:bg-white:hover,
+.dark .focus\:bg-white:focus {
+  background-color: #1a2d44;
+}
+
+.dark .chrome .bg-white,
+.dark .chrome .hover\:bg-white:hover,
+.dark .chrome .focus\:bg-white:focus {
+  background-color: #fff;
+}
+
+.dark .chrome .text-ink,
+.dark .chrome .hover\:text-ink:hover {
+  color: #0c2340;
+}
+
+.dark .chrome .hover\:bg-slate-100:hover {
+  background-color: #f1f5f9;
+}
+
+.dark button.bg-ink {
+  background-color: #f4f7fb;
+  color: #0c2340;
+}
+
+.dark button.bg-ink:hover {
+  background-color: #e2e8f0;
+}
+
+.dark button.bg-ink:disabled {
+  background-color: #334155;
+  color: #94a3b8;
 }

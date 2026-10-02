@@ -1,8 +1,9 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import BrandLockup from '@/components/BrandLockup';
+import ThemeToggle from '@/components/ThemeToggle';
 import { formatShortDate, formatTime } from '@/lib/format';
 
 function formatDistance(value) {
@@ -10,6 +11,14 @@ function formatDistance(value) {
   const meters = Number(value);
   if (Number.isNaN(meters)) return '—';
   return `${Math.round(meters)} m`;
+}
+
+function noticeLabel(log) {
+  const parts = [];
+  if (log.late_arrival) parts.push('Late');
+  if (log.early_departure) parts.push('Early');
+  if (log.synced_from_offline) parts.push('Offline');
+  return parts;
 }
 
 function Stat({ label, value, hint }) {
@@ -29,36 +38,88 @@ export default function AdminDashboard() {
   const [error, setError] = useState(null);
   const [logs, setLogs] = useState([]);
   const [staffList, setStaffList] = useState([]);
+  const [report, setReport] = useState(null);
+  const [alerts, setAlerts] = useState([]);
   const [filterDate, setFilterDate] = useState('');
+  const [reportFrom, setReportFrom] = useState('');
+  const [reportTo, setReportTo] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const seenAlerts = useRef(new Set());
+  const primedAlerts = useRef(false);
 
-  const fetchDashboardData = async (adminPin, date = '') => {
-    setLoading(true);
-    setError(null);
+  const fetchDashboardData = async (adminPin, date = filterDate, range = { from: reportFrom, to: reportTo }, { silent = false } = {}) => {
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
-      const url = `/api/admin?pin=${encodeURIComponent(adminPin)}${date ? `&date=${date}` : ''}`;
-      const res = await fetch(url);
+      const params = new URLSearchParams({ pin: adminPin });
+      if (date) params.set('date', date);
+      if (range.from) params.set('from', range.from);
+      if (range.to) params.set('to', range.to);
+      const res = await fetch(`/api/admin?${params.toString()}`);
       const data = await res.json();
 
       if (res.ok && data.success) {
         setLogs(data.logs);
         setStaffList(data.staff);
+        setReport(data.report);
+        setAlerts(data.alerts || []);
         setIsAuthenticated(true);
+
+        const incoming = data.alerts || [];
+        if (!primedAlerts.current) {
+          incoming.forEach((alert) => seenAlerts.current.add(alert.id));
+          primedAlerts.current = true;
+        } else if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          incoming
+            .filter((alert) => !alert.read_at && !seenAlerts.current.has(alert.id))
+            .forEach((alert) => {
+              seenAlerts.current.add(alert.id);
+              new Notification('Btel attendance', { body: alert.message });
+            });
+        }
       } else if (res.status === 401) {
         setError(data.error || 'That PIN is not correct.');
-      } else {
+      } else if (!silent) {
         setError(data.error || 'Could not load the dashboard.');
       }
     } catch {
-      setError('Could not reach the admin server.');
+      if (!silent) setError('Could not reach the admin server.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
+  useEffect(() => {
+    if (typeof Notification !== 'undefined') {
+      setNotifyEnabled(Notification.permission === 'granted');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    const timer = setInterval(() => {
+      fetchDashboardData(pin, filterDate, { from: reportFrom, to: reportTo }, { silent: true });
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [isAuthenticated, pin, filterDate, reportFrom, reportTo]);
+
   const handleLogin = (event) => {
     event.preventDefault();
-    fetchDashboardData(pin, filterDate);
+    primedAlerts.current = false;
+    seenAlerts.current = new Set();
+    fetchDashboardData(pin, filterDate, { from: reportFrom, to: reportTo });
+  };
+
+  const postAdmin = async (body) => {
+    const res = await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin, ...body }),
+    });
+    return res.json();
   };
 
   const handleResetDevice = async (userId, staffName) => {
@@ -71,19 +132,53 @@ export default function AdminDashboard() {
     }
 
     try {
-      const res = await fetch('/api/admin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin, action: 'reset_device', userId }),
-      });
-      const data = await res.json();
+      const data = await postAdmin({ action: 'reset_device', userId });
       if (data.success) {
-        fetchDashboardData(pin, filterDate);
+        fetchDashboardData(pin);
       } else {
         setError(data.error || 'Could not reset that device.');
       }
     } catch {
       setError('Could not reset that device.');
+    }
+  };
+
+  const handleMarkRead = async (alertId) => {
+    try {
+      const data = await postAdmin({ action: alertId ? 'mark_alert_read' : 'mark_all_alerts_read', alertId });
+      if (data.success) fetchDashboardData(pin, filterDate, { from: reportFrom, to: reportTo }, { silent: true });
+    } catch {
+      setError('Could not update alerts.');
+    }
+  };
+
+  const handleEnableAlerts = async () => {
+    if (typeof Notification === 'undefined') {
+      setError('This browser does not support notifications.');
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    setNotifyEnabled(permission === 'granted');
+  };
+
+  const handleBackup = async () => {
+    try {
+      const data = await postAdmin({ action: 'backup' });
+      if (!data.success || !data.backup) {
+        setError(data.error || 'Could not create a backup.');
+        return;
+      }
+      const blob = new Blob([JSON.stringify(data.backup, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `btel-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError('Could not create a backup.');
     }
   };
 
@@ -111,13 +206,19 @@ export default function AdminDashboard() {
     [staffList, query]
   );
 
+  const filteredReport = useMemo(
+    () => (report?.staff || []).filter((row) => !query || row.name.toLowerCase().includes(query) || row.email.toLowerCase().includes(query)),
+    [report, query]
+  );
+
   const openShifts = filteredLogs.filter((log) => !log.signed_out_at).length;
   const outsideOffice = filteredLogs.filter((log) => log.is_within_geofence === false).length;
+  const unreadAlerts = alerts.filter((alert) => !alert.read_at);
 
   const exportToCSV = () => {
     if (filteredLogs.length === 0) return;
 
-    const headers = ['Staff Name,Email,Date,Sign In Time,Sign Out Time,Distance (m),Geofence'];
+    const headers = ['Staff Name,Email,Date,Sign In Time,Sign Out Time,Distance (m),Geofence,Late,Early,Offline'];
     const rows = filteredLogs.map((log) =>
       [
         `"${log.staff_name}"`,
@@ -127,6 +228,9 @@ export default function AdminDashboard() {
         `"${formatTime(log.signed_out_at)}"`,
         log.distance_meters ?? '',
         log.is_within_geofence ? 'Inside' : 'Outside',
+        log.late_arrival ? 'Yes' : 'No',
+        log.early_departure ? 'Yes' : 'No',
+        log.synced_from_offline ? 'Yes' : 'No',
       ].join(',')
     );
 
@@ -141,8 +245,11 @@ export default function AdminDashboard() {
 
   if (!isAuthenticated) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-ink px-4 py-10">
-        <div className="w-full max-w-sm rounded-3xl bg-white p-8 shadow-2xl">
+      <main className="flex min-h-screen items-center justify-center bg-ink px-4 py-10 dark:bg-background">
+        <div className="relative w-full max-w-sm rounded-3xl bg-white p-8 shadow-2xl">
+          <div className="absolute top-4 right-4">
+            <ThemeToggle tone="surface" />
+          </div>
           <BrandLockup tone="dark" />
           <h1 className="mt-8 text-2xl font-semibold tracking-tight text-ink">Admin</h1>
           <p className="mt-2 text-sm leading-6 text-slate-600">Enter the PIN to review attendance and registered phones.</p>
@@ -188,10 +295,18 @@ export default function AdminDashboard() {
 
   return (
     <main className="min-h-screen bg-background">
-      <header className="border-b-4 border-brand bg-ink text-white">
+      <header className="chrome border-b-4 border-brand bg-ink text-white">
         <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <BrandLockup />
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <ThemeToggle />
+            <button
+              type="button"
+              onClick={handleBackup}
+              className="rounded-lg bg-white px-3.5 py-2 text-xs font-semibold text-ink transition hover:bg-slate-100"
+            >
+              Download backup
+            </button>
             <button
               type="button"
               onClick={exportToCSV}
@@ -229,6 +344,128 @@ export default function AdminDashboard() {
           <Stat label="Outside office" value={outsideOffice} hint={`${staffList.length} registered staff`} />
         </section>
 
+        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Alerts</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                {unreadAlerts.length === 0 ? 'No unread late, early, or offline notices.' : `${unreadAlerts.length} unread.`}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {!notifyEnabled && (
+                <button type="button" onClick={handleEnableAlerts} className="rounded-lg bg-ink px-3 py-2 text-xs font-semibold text-white">
+                  Enable alerts
+                </button>
+              )}
+              {unreadAlerts.length > 0 && (
+                <button type="button" onClick={() => handleMarkRead()} className="rounded-lg px-3 py-2 text-xs font-semibold text-ink ring-1 ring-slate-200">
+                  Mark all read
+                </button>
+              )}
+            </div>
+          </div>
+          <ul className="max-h-64 divide-y divide-slate-100 overflow-y-auto">
+            {alerts.length === 0 ? (
+              <li className="px-4 py-6 text-sm text-slate-500">Alerts appear when someone arrives late, leaves early, or syncs an offline record.</li>
+            ) : (
+              alerts.map((alert) => (
+                <li key={alert.id} className="flex items-start justify-between gap-3 px-4 py-3.5">
+                  <div>
+                    <p className={`text-sm ${alert.read_at ? 'text-slate-500' : 'font-medium text-ink'}`}>{alert.message}</p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {formatShortDate(alert.created_at)} · {formatTime(alert.created_at)}
+                    </p>
+                  </div>
+                  {!alert.read_at && (
+                    <button type="button" onClick={() => handleMarkRead(alert.id)} className="shrink-0 text-xs font-semibold text-brand hover:underline">
+                      Read
+                    </button>
+                  )}
+                </li>
+              ))
+            )}
+          </ul>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Attendance report</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                {reportFrom || reportTo
+                  ? `From ${reportFrom || reportTo} to ${reportTo || reportFrom}.`
+                  : 'Last 30 office days. Late is after 9:15 AM. Early is before 5:00 PM.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <input
+                type="date"
+                aria-label="Report from"
+                value={reportFrom}
+                onChange={(event) => {
+                  const from = event.target.value;
+                  setReportFrom(from);
+                  fetchDashboardData(pin, filterDate, { from, to: reportTo });
+                }}
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
+              />
+              <input
+                type="date"
+                aria-label="Report to"
+                value={reportTo}
+                onChange={(event) => {
+                  const to = event.target.value;
+                  setReportTo(to);
+                  fetchDashboardData(pin, filterDate, { from: reportFrom, to });
+                }}
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
+              />
+            </div>
+          </div>
+          <div className="grid gap-3 border-b border-slate-100 px-4 py-4 sm:grid-cols-4">
+            <Stat label="Days" value={report?.totals.records ?? 0} hint="Attendance records in range" />
+            <Stat label="Late" value={report?.totals.late ?? 0} hint="Arrivals after 9:15 AM" />
+            <Stat label="Early" value={report?.totals.early ?? 0} hint="Departures before 5:00 PM" />
+            <Stat label="Open" value={report?.totals.open ?? 0} hint="Still signed in" />
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                <tr>
+                  <th className="px-4 py-3 font-semibold">Staff</th>
+                  <th className="px-4 py-3 font-semibold">Days</th>
+                  <th className="px-4 py-3 font-semibold">Late</th>
+                  <th className="px-4 py-3 font-semibold">Early</th>
+                  <th className="px-4 py-3 font-semibold">Open</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredReport.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-500">
+                      No attendance in this report range.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredReport.map((row) => (
+                    <tr key={row.user_id}>
+                      <td className="px-4 py-3.5">
+                        <p className="font-medium text-ink">{row.name}</p>
+                        <p className="mt-0.5 text-xs text-slate-500">{row.email}</p>
+                      </td>
+                      <td className="px-4 py-3.5 text-slate-700">{row.days}</td>
+                      <td className="px-4 py-3.5 text-slate-700">{row.late}</td>
+                      <td className="px-4 py-3.5 text-slate-700">{row.early}</td>
+                      <td className="px-4 py-3.5 text-slate-700">{row.open}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:flex-row">
           <input
             type="search"
@@ -243,7 +480,7 @@ export default function AdminDashboard() {
             onChange={(event) => {
               const nextDate = event.target.value;
               setFilterDate(nextDate);
-              fetchDashboardData(pin, nextDate);
+              fetchDashboardData(pin, nextDate, { from: reportFrom, to: reportTo });
             }}
             className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm outline-none focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/15"
           />
@@ -252,7 +489,7 @@ export default function AdminDashboard() {
               type="button"
               onClick={() => {
                 setFilterDate('');
-                fetchDashboardData(pin, '');
+                fetchDashboardData(pin, '', { from: reportFrom, to: reportTo });
               }}
               className="rounded-xl px-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
@@ -270,13 +507,14 @@ export default function AdminDashboard() {
         <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
           <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] text-left text-sm">
+              <table className="w-full min-w-[820px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
                   <tr>
                     <th className="px-4 py-3 font-semibold">Staff</th>
                     <th className="px-4 py-3 font-semibold">Date</th>
                     <th className="px-4 py-3 font-semibold">Sign in</th>
                     <th className="px-4 py-3 font-semibold">Sign out</th>
+                    <th className="px-4 py-3 font-semibold">Notice</th>
                     <th className="px-4 py-3 font-semibold">Distance</th>
                     <th className="px-4 py-3 font-semibold">Location</th>
                   </tr>
@@ -284,42 +522,46 @@ export default function AdminDashboard() {
                 <tbody className="divide-y divide-slate-100">
                   {loading ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">
+                      <td colSpan={7} className="px-4 py-10 text-center text-sm text-slate-500">
                         Loading records…
                       </td>
                     </tr>
                   ) : filteredLogs.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">
+                      <td colSpan={7} className="px-4 py-10 text-center text-sm text-slate-500">
                         No attendance records match this view.
                       </td>
                     </tr>
                   ) : (
-                    filteredLogs.map((log) => (
-                      <tr key={log.id} className="align-top">
-                        <td className="px-4 py-3.5">
-                          <p className="font-medium text-ink">{log.staff_name}</p>
-                          <p className="mt-0.5 text-xs text-slate-500">{log.email}</p>
-                        </td>
-                        <td className="px-4 py-3.5 text-slate-700">{formatShortDate(log.marked_at)}</td>
-                        <td className="px-4 py-3.5 font-medium text-emerald-700">{formatTime(log.marked_at)}</td>
-                        <td className={`px-4 py-3.5 font-medium ${log.signed_out_at ? 'text-rose-700' : 'text-amber-700'}`}>
-                          {log.signed_out_at ? formatTime(log.signed_out_at) : 'Open'}
-                        </td>
-                        <td className="px-4 py-3.5 text-slate-600">{formatDistance(log.distance_meters)}</td>
-                        <td className="px-4 py-3.5">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
-                              log.is_within_geofence
-                                ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
-                                : 'bg-amber-50 text-amber-800 ring-1 ring-amber-200'
-                            }`}
-                          >
-                            {log.is_within_geofence ? 'Inside' : 'Outside'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))
+                    filteredLogs.map((log) => {
+                      const notices = noticeLabel(log);
+                      return (
+                        <tr key={log.id} className="align-top">
+                          <td className="px-4 py-3.5">
+                            <p className="font-medium text-ink">{log.staff_name}</p>
+                            <p className="mt-0.5 text-xs text-slate-500">{log.email}</p>
+                          </td>
+                          <td className="px-4 py-3.5 text-slate-700">{formatShortDate(log.marked_at)}</td>
+                          <td className="px-4 py-3.5 font-medium text-emerald-700">{formatTime(log.marked_at)}</td>
+                          <td className={`px-4 py-3.5 font-medium ${log.signed_out_at ? 'text-rose-700' : 'text-amber-700'}`}>
+                            {log.signed_out_at ? formatTime(log.signed_out_at) : 'Open'}
+                          </td>
+                          <td className="px-4 py-3.5 text-xs font-semibold text-amber-800">{notices.length ? notices.join(' · ') : '—'}</td>
+                          <td className="px-4 py-3.5 text-slate-600">{formatDistance(log.distance_meters)}</td>
+                          <td className="px-4 py-3.5">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                log.is_within_geofence
+                                  ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                                  : 'bg-amber-50 text-amber-800 ring-1 ring-amber-200'
+                              }`}
+                            >
+                              {log.is_within_geofence ? 'Inside' : 'Outside'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

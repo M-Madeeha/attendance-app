@@ -1,148 +1,192 @@
-// app/api/attendance/route.js
-import { NextResponse } from 'next/server';
-import { databaseErrorMessage, query } from '@/lib/db';
-import { calculateDistanceMeters } from '@/lib/geofence';
-import { officeDay, officeToday } from '@/lib/office-time';
+import { NextResponse } from "next/server";
+import { calculateDistanceMeters } from "@/lib/geofence";
+import { lagosDayRange } from "@/lib/office-time";
+import { createAuthToken, hashAuthToken, hashPassword, verifyPassword } from "@/lib/passwords";
+import { databaseErrorMessage, getPrisma } from "@/lib/prisma";
+import { arrivalNotice, departureNotice } from "@/lib/schedule";
 
-// Time format helper: "2:30 PM" (no seconds)
-function getFormattedTime() {
-  return new Date().toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
+function formatLagosTime(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
     hour12: true,
-  });
+    timeZone: "Africa/Lagos",
+  }).format(date);
 }
 
-// GET: Fetch today's status and past 30 days history
+function serializeLog(log, { includeStatus = false } = {}) {
+  if (!log) return null;
+
+  const serialized = {
+    id: log.id,
+    marked_at: log.markedAt,
+    signed_out_at: log.signedOutAt,
+    late_arrival: Boolean(log.lateArrival),
+    early_departure: Boolean(log.earlyDeparture),
+    synced_from_offline: Boolean(log.syncedFromOffline),
+  };
+
+  if (includeStatus) serialized.status = log.status;
+  return serialized;
+}
+
+function dayWhere(userId, when = new Date()) {
+  const { start, end } = lagosDayRange(when);
+  return {
+    userId,
+    markedAt: { gte: start, lt: end },
+  };
+}
+
+function parseRecordedAt(value, offline) {
+  if (!offline || !value) return new Date();
+  const recordedAt = new Date(value);
+  if (Number.isNaN(recordedAt.getTime())) return null;
+  const drift = recordedAt.getTime() - Date.now();
+  if (drift > 5 * 60 * 1000 || drift < -36 * 60 * 60 * 1000) return null;
+  return recordedAt;
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
-    const email = searchParams.get('email');
+    const email = searchParams.get("email");
 
     if (!email) {
-      return NextResponse.json({ error: 'Email parameter is required' }, { status: 400 });
+      return NextResponse.json({ error: "Email parameter is required" }, { status: 400 });
     }
 
-    // 1. Fetch user ID
-    const userRes = await query(
-      'SELECT id, name FROM users WHERE LOWER(email) = $1',
-      [email.trim().toLowerCase()]
-    );
+    const prisma = getPrisma();
+    const user = await prisma.user.findUnique({
+      where: { email: email.trim().toLowerCase() },
+    });
 
-    if (userRes.rows.length === 0) {
+    if (!user) {
       return NextResponse.json({ success: true, todayLog: null, history: [] });
     }
-    const userId = userRes.rows[0].id;
 
-    // 2. Fetch today's record for the Lagos office day
-    const todayLogRes = await query(
-      `SELECT id, marked_at, signed_out_at 
-       FROM attendance_logs 
-       WHERE user_id = $1 AND ${officeDay('marked_at')} = ${officeToday()}
-       ORDER BY marked_at DESC LIMIT 1`,
-      [userId]
-    );
-
-    // 3. Fetch past 30 days history
-    const historyRes = await query(
-      `SELECT id, marked_at, signed_out_at, status 
-       FROM attendance_logs 
-       WHERE user_id = $1 
-       ORDER BY marked_at DESC LIMIT 30`,
-      [userId]
-    );
+    const [todayLog, history] = await Promise.all([
+      prisma.attendanceLog.findFirst({
+        where: dayWhere(user.id),
+        orderBy: { markedAt: "desc" },
+      }),
+      prisma.attendanceLog.findMany({
+        where: { userId: user.id },
+        orderBy: { markedAt: "desc" },
+        take: 30,
+      }),
+    ]);
 
     return NextResponse.json({
       success: true,
-      todayLog: todayLogRes.rows[0] || null,
-      history: historyRes.rows,
+      todayLog: serializeLog(todayLog),
+      history: history.map((log) => serializeLog(log, { includeStatus: true })),
     });
   } catch (error) {
-    console.error('Error fetching attendance data:', error);
+    console.error("Error fetching attendance data:", error);
     return NextResponse.json({ error: databaseErrorMessage(error) }, { status: 500 });
   }
 }
 
-// POST: Record Sign-In or Sign-Out
 export async function POST(request) {
   try {
-    const { fullName, email, password, latitude, longitude, action, deviceId } = await request.json();
+    const { fullName, email, password, authToken, latitude, longitude, action, deviceId, recordedAt, offline } = await request.json();
 
-    if (!email || !password || !latitude || !longitude || !action || !deviceId) {
+    if (!email || latitude == null || longitude == null || !action || !deviceId || (!password && !authToken)) {
       return NextResponse.json(
-        { error: 'Missing required credentials, location, or device identifier.' },
+        { error: "Missing required credentials, location, or device identifier." },
         { status: 400 }
       );
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const cleanPassword = password.trim();
+    const cleanPassword = typeof password === "string" ? password.trim() : "";
+    const prisma = getPrisma();
+    const effectiveAt = parseRecordedAt(recordedAt, Boolean(offline));
+    if (!effectiveAt) {
+      return NextResponse.json(
+        { error: "That offline record is outside the time that can be synced." },
+        { status: 400 }
+      );
+    }
 
-    // 1. Authenticate or Register User with Device ID
-    let userRes = await query(
-      'SELECT id, name, password_hash, device_id FROM users WHERE LOWER(email) = $1',
-      [cleanEmail]
-    );
-    let userId;
+    let user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    let issuedToken = null;
 
-    if (userRes.rows.length === 0) {
+    if (authToken) {
+      if (!user || user.authTokenHash !== hashAuthToken(authToken)) {
+        return NextResponse.json({ error: "Sign in again to refresh this phone." }, { status: 401 });
+      }
+    } else if (!user) {
       if (!fullName || !fullName.trim()) {
         return NextResponse.json(
-          { error: 'First-time registration requires a Full Name.' },
+          { error: "First-time registration requires a Full Name." },
           { status: 400 }
         );
       }
 
-      // First time registration: Bind account to this device ID
-      const newUser = await query(
-        'INSERT INTO users (name, email, password_hash, role, device_id) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [fullName.trim(), cleanEmail, cleanPassword, 'staff', deviceId]
-      );
-      userId = newUser.rows[0].id;
+      const issued = createAuthToken();
+      issuedToken = issued.token;
+      user = await prisma.user.create({
+        data: {
+          name: fullName.trim(),
+          email: cleanEmail,
+          passwordHash: await hashPassword(cleanPassword),
+          role: "staff",
+          deviceId,
+          authTokenHash: issued.hash,
+        },
+      });
     } else {
-      const existingUser = userRes.rows[0];
-
-      if (existingUser.password_hash !== cleanPassword) {
+      const check = await verifyPassword(cleanPassword, user.passwordHash);
+      if (!check.ok) {
         return NextResponse.json(
-          { error: 'Incorrect password for this email address.' },
+          { error: "Incorrect password for this email address." },
           { status: 401 }
         );
       }
 
-      // If user has no device registered yet, bind this first one
-      if (!existingUser.device_id) {
-        await query('UPDATE users SET device_id = $1 WHERE id = $2', [deviceId, existingUser.id]);
-      } else if (existingUser.device_id !== deviceId) {
-        // Reject check-in from any other phone
-        return NextResponse.json(
-          {
-            success: false,
-            message: 'Device mismatch: You can only check in from your registered phone. Please contact your Admin to switch devices.',
-          },
-          { status: 403 }
-        );
-      }
-
-      userId = existingUser.id;
+      const issued = createAuthToken();
+      issuedToken = issued.token;
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          authTokenHash: issued.hash,
+          ...(check.legacy ? { passwordHash: await hashPassword(cleanPassword) } : {}),
+        },
+      });
     }
-    // 2. Fetch office location from PostgreSQL
-    const officeRes = await query(
-      'SELECT latitude, longitude, radius_meters FROM office_locations LIMIT 1'
-    );
 
-    if (officeRes.rows.length === 0) {
+    if (!user.deviceId) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { deviceId },
+      });
+    } else if (user.deviceId !== deviceId) {
       return NextResponse.json(
-        { error: 'Office location not configured in database' },
+        {
+          success: false,
+          message:
+            "Device mismatch: You can only check in from your registered phone. Please contact your Admin to switch devices.",
+        },
+        { status: 403 }
+      );
+    }
+
+    const office = await prisma.officeLocation.findFirst({
+      orderBy: { id: "asc" },
+    });
+
+    if (!office) {
+      return NextResponse.json(
+        { error: "Office location not configured in database" },
         { status: 500 }
       );
     }
 
-    const office = officeRes.rows[0];
-    const officeLat = parseFloat(office.latitude);
-    const officeLon = parseFloat(office.longitude);
-    const maxRadius = office.radius_meters || 100;
-
-    // 3. Calculate distance
+    const officeLat = Number(office.latitude);
+    const officeLon = Number(office.longitude);
+    const maxRadius = office.radiusMeters || 100;
     const distanceMeters = calculateDistanceMeters(
       parseFloat(latitude),
       parseFloat(longitude),
@@ -163,77 +207,131 @@ export async function POST(request) {
       );
     }
 
-    const currentTimeFormatted = getFormattedTime();
+    const currentTimeFormatted = formatLagosTime(effectiveAt);
 
-    // 4. Action handling
-    if (action === 'signin') {
-      const existingToday = await query(
-        `SELECT id, signed_out_at FROM attendance_logs
-         WHERE user_id = $1 AND ${officeDay('marked_at')} = ${officeToday()}
-         ORDER BY marked_at DESC LIMIT 1`,
-        [userId]
-      );
+    if (action === "signin") {
+      const existingToday = await prisma.attendanceLog.findFirst({
+        where: dayWhere(user.id, effectiveAt),
+        orderBy: { markedAt: "desc" },
+      });
 
-      if (existingToday.rows.length > 0) {
+      if (existingToday) {
         return NextResponse.json(
           {
             success: false,
-            message: existingToday.rows[0].signed_out_at
-              ? 'You have already completed attendance for today.'
-              : 'You are already signed in today.',
+            message: existingToday.signedOutAt
+              ? "You have already completed attendance for today."
+              : "You are already signed in today.",
           },
           { status: 409 }
         );
       }
 
-      const insertRes = await query(
-        `INSERT INTO attendance_logs 
-         (user_id, marked_at, latitude, longitude, distance_meters, is_within_geofence, status) 
-         VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, 'present') 
-         RETURNING *`,
-        [userId, latitude, longitude, distanceMeters, isWithinGeofence]
-      );
-
-      return NextResponse.json({
-        success: true,
-        message: `Signed in at ${currentTimeFormatted}. You are ${roundedDistance} m from the office.`,
-        log: insertRes.rows[0],
+      const arrival = arrivalNotice(effectiveAt);
+      const log = await prisma.attendanceLog.create({
+        data: {
+          userId: user.id,
+          markedAt: effectiveAt,
+          latitude,
+          longitude,
+          distanceMeters,
+          isWithinGeofence,
+          status: "present",
+          lateArrival: arrival.late,
+          syncedFromOffline: Boolean(offline),
+        },
       });
-    } else if (action === 'signout') {
-      const todayLog = await query(
-        `SELECT id FROM attendance_logs 
-         WHERE user_id = $1 AND ${officeDay('marked_at')} = ${officeToday()} AND signed_out_at IS NULL 
-         ORDER BY marked_at DESC LIMIT 1`,
-        [userId]
-      );
 
-      if (todayLog.rows.length === 0) {
-        return NextResponse.json({
-          success: false,
-          message: 'No open sign-in for today. Sign in before signing out.',
+      const alerts = [];
+      if (arrival.late) {
+        alerts.push({
+          type: "late_arrival",
+          message: `${user.name} arrived late at ${currentTimeFormatted}.`,
+          userId: user.id,
         });
       }
+      if (offline) {
+        alerts.push({
+          type: "offline_sync",
+          message: `${user.name}'s sign-in was saved offline and synced.`,
+          userId: user.id,
+        });
+      }
+      if (alerts.length > 0) {
+        await prisma.adminAlert.createMany({ data: alerts });
+      }
 
-      const updateRes = await query(
-        `UPDATE attendance_logs 
-         SET signed_out_at = CURRENT_TIMESTAMP 
-         WHERE id = $1 RETURNING *`,
-        [todayLog.rows[0].id]
-      );
+      const message = [`Signed in at ${currentTimeFormatted}. You are ${roundedDistance} m from the office.`];
+      if (arrival.notice) message.push(arrival.notice);
+      if (offline) message.push("This record was synced from this phone.");
 
       return NextResponse.json({
         success: true,
-        message: `Signed out at ${currentTimeFormatted}. You are ${roundedDistance} m from the office.`,
-        log: updateRes.rows[0],
+        message: message.join(" "),
+        notice: arrival.notice,
+        authToken: issuedToken,
+        log: serializeLog(log, { includeStatus: true }),
       });
     }
 
-    return NextResponse.json({ error: 'Unknown action.' }, { status: 400 });
+    if (action === "signout") {
+      const todayLog = await prisma.attendanceLog.findFirst({
+        where: { ...dayWhere(user.id, effectiveAt), signedOutAt: null },
+        orderBy: { markedAt: "desc" },
+      });
+
+      if (!todayLog) {
+        return NextResponse.json({
+          success: false,
+          message: "No open sign-in for today. Sign in before signing out.",
+        });
+      }
+
+      const departure = departureNotice(effectiveAt);
+      const log = await prisma.attendanceLog.update({
+        where: { id: todayLog.id },
+        data: {
+          signedOutAt: effectiveAt,
+          earlyDeparture: departure.early,
+          syncedFromOffline: Boolean(offline) || todayLog.syncedFromOffline,
+        },
+      });
+
+      const alerts = [];
+      if (departure.early) {
+        alerts.push({
+          type: "early_departure",
+          message: `${user.name} left early at ${currentTimeFormatted}.`,
+          userId: user.id,
+        });
+      }
+      if (offline) {
+        alerts.push({
+          type: "offline_sync",
+          message: `${user.name}'s sign-out was saved offline and synced.`,
+          userId: user.id,
+        });
+      }
+      if (alerts.length > 0) {
+        await prisma.adminAlert.createMany({ data: alerts });
+      }
+
+      const message = [`Signed out at ${currentTimeFormatted}. You are ${roundedDistance} m from the office.`];
+      if (departure.notice) message.push(departure.notice);
+      if (offline) message.push("This record was synced from this phone.");
+
+      return NextResponse.json({
+        success: true,
+        message: message.join(" "),
+        notice: departure.notice,
+        authToken: issuedToken,
+        log: serializeLog(log, { includeStatus: true }),
+      });
+    }
+
+    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   } catch (error) {
-    console.error('Server error recording attendance:', error);
-    return NextResponse.json(
-      { error: databaseErrorMessage(error) },
-      { status: 500 }
-    );
+    console.error("Server error recording attendance:", error);
+    return NextResponse.json({ error: databaseErrorMessage(error) }, { status: 500 });
   }
 }
